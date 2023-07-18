@@ -1,0 +1,16 @@
+connection:
+  type: "Snowflake"
+  user: ""
+  password: ""
+  account: ""
+  database: ""
+  schema: ""
+  warehouse: ""
+  role: ""
+  authenticator: "externalbrowser"
+  # For MySQL/PostgreSQL
+  # host: "localhost"
+  # port: 3306
+
+
+tables_file: "tables.csv"
