@@ -29,9 +29,14 @@ build-backend = "poetry.core.masonry.api"
 [tool.poetry.dependencies]
 python = "^3.9"
 sqeleton = "0.1.7"
+polars = "^0.20.1"
+openpyxl = "^3.1.2"
+pyyaml = "^6.0.1"
 
 [tool.poetry.scripts]
-declutrr = "dbqt.app:main"
+dbqt = "dbqt.app:main"
+colcompare = "dbqt.tools.column_compare:main"
+dbstats = "dbqt.tools.dbstats:main"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "*"
