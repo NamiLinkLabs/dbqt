@@ -1,7 +1,7 @@
 import yaml
 import pandas as pd
 import logging
-from src.connectors import get_connector
+from dbqt.connections import get_connector
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ def get_table_stats(config_path: str):
 def main():
     import sys
     if len(sys.argv) != 2:
-        print("Usage: python dbstats.py <config_file>")
+        print("Usage: dbstats <config_file>")
         sys.exit(1)
         
     get_table_stats(sys.argv[1])

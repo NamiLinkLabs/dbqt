@@ -1,4 +1,6 @@
+import argparse
 import polars as pl
+import re
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
@@ -7,11 +9,11 @@ from datetime import datetime
 
 # Define type mappings for equivalent data types
 TYPE_MAPPINGS = {
-    'INTEGER': ['INT', 'INTEGER', 'BIGINT', 'SMALLINT', 'TINYINT'],
+    'INTEGER': ['INT', 'INTEGER', 'BIGINT', 'SMALLINT', 'TINYINT','NUMBER'],
     'VARCHAR': ['VARCHAR', 'TEXT', 'CHAR', 'STRING', 'NVARCHAR'],
     'DECIMAL': ['DECIMAL', 'NUMERIC', 'NUMBER'],
     'FLOAT': ['FLOAT', 'REAL', 'DOUBLE', 'DOUBLE PRECISION'],
-    'TIMESTAMP': ['TIMESTAMP', 'DATETIME', 'DATETIME2'],
+    'TIMESTAMP': ['TIMESTAMP','DATETIME'],
     'DATE': ['DATE'],
     'BOOLEAN': ['BOOLEAN', 'BOOL', 'BIT']
 }
@@ -28,6 +30,10 @@ def are_types_compatible(type1, type2):
     if type1 == type2:
         return True
     
+    # Special handling for TIMESTAMP variations
+    if re.match(r'^TIMESTAMP.*', type1) and re.match(r'^TIMESTAMP.*', type2):
+        return True
+    
     # Check if types belong to the same group
     for type_group in TYPE_MAPPINGS.values():
         if type1 in type_group and type2 in type_group:
@@ -35,10 +41,10 @@ def are_types_compatible(type1, type2):
     
     return False
 
-def read_csv_files():
+def read_csv_files(source_path, target_path):
     """Read source and target CSV files using Polars"""
-    source_df = pl.read_csv("csv/source.csv")
-    target_df = pl.read_csv("csv/target.csv")
+    source_df = pl.read_csv(source_path)
+    target_df = pl.read_csv(target_path)
     return source_df, target_df
 
 def compare_tables(source_df, target_df):
@@ -199,8 +205,14 @@ def create_excel_report(comparison_results, source_df, target_df):
     wb.save(f"results/results_{timestamp}.xlsx")
 
 def main():
+    # Set up argument parser
+    parser = argparse.ArgumentParser(description='Compare columns between two CSV files')
+    parser.add_argument('source', help='Path to the source CSV file')
+    parser.add_argument('target', help='Path to the target CSV file')
+    args = parser.parse_args()
+
     # Read source and target files
-    source_df, target_df = read_csv_files()
+    source_df, target_df = read_csv_files(args.source, args.target)
     
     # Compare tables
     table_comparison = compare_tables(source_df, target_df)
