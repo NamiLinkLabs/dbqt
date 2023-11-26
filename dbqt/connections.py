@@ -11,7 +11,7 @@ from reladiff import connect as reladiff_connect
 logger = logging.getLogger(__name__)
 
 
-class AbstractDataConnector(ABC):
+class DBConnector(ABC):
     def __init__(self, config):
         self.config = config
         self.connection = None
@@ -78,7 +78,7 @@ class AbstractDataConnector(ABC):
         self.logger.info(f"Table {table_name} generated successfully")
 
 
-class MySQLDataConnector(AbstractDataConnector):
+class MySQLDataConnector(DBConnector):
     @property
     def connection_details(self):
         conn_str = f"mysql://{self.config['user']}:{self.config['password']}@{self.config['host']}:{self.config.get('port', '3306')}/{self.config.get('database', 'information_schema')}"
@@ -97,7 +97,7 @@ class MySQLDataConnector(AbstractDataConnector):
         return [(row[0], row[1]) for row in result]
 
 
-class SnowflakeDataConnector(AbstractDataConnector):
+class Snowflake(DBConnector):
     @property
     def connection_details(self):
         auth = "&authenticator=externalbrowser" if self.config.get('authenticator') == "externalbrowser" else ""
@@ -119,7 +119,7 @@ class SnowflakeDataConnector(AbstractDataConnector):
         return [(row[0], row[1]) for row in result]
 
 
-class DuckDBDataConnector(AbstractDataConnector):
+class DuckDB(DBConnector):
     def __init__(self, config):
         super().__init__(config)
         self.duck_db_path = os.path.join(os.getcwd(), 'duckdb.db')
@@ -140,7 +140,7 @@ class DuckDBDataConnector(AbstractDataConnector):
         return result if result else "Success"
 
 
-class CSVDataConnector(DuckDBDataConnector):
+class CSV(DuckDB):
     def establish_connection(self):
         super().establish_connection()
         self.config['table'] = f"data{self.config.get('prefix', '')}"
@@ -151,7 +151,7 @@ class CSVDataConnector(DuckDBDataConnector):
         )
 
 
-class ParquetDataConnector(DuckDBDataConnector):
+class Parquet(DuckDB):
     def establish_connection(self):
         super().establish_connection()
         self.config['table'] = f"data{self.config.get('prefix', '')}"
@@ -162,7 +162,7 @@ class ParquetDataConnector(DuckDBDataConnector):
         )
 
 
-class S3ParquetDataConnector(ParquetDataConnector):
+class S3Parquet(Parquet):
     def __init__(self, config):
         super().__init__(config)
         self.session = boto3.Session(
@@ -230,7 +230,7 @@ class S3ParquetDataConnector(ParquetDataConnector):
             raise Exception("Failed to fetch parquet file from S3")
 
 
-class PostgreSQLDataConnector(AbstractDataConnector):
+class PostgreSQL(DBConnector):
     @property
     def connection_details(self):
         conn_str = f"postgresql://{self.config['user']}:{self.config['password']}@{self.config['host']}:5432/{self.config['database']}"
@@ -241,12 +241,12 @@ class PostgreSQLDataConnector(AbstractDataConnector):
 def create_connector(config):
     connector_map = {
         'MySQL': MySQLDataConnector,
-        'Snowflake': SnowflakeDataConnector,
-        'CSV': CSVDataConnector,
-        'Parquet': ParquetDataConnector,
-        'S3Parquet': S3ParquetDataConnector,
-        'PostgreSQL': PostgreSQLDataConnector,
-        'DuckDB': DuckDBDataConnector,
+        'Snowflake': Snowflake,
+        'CSV': CSV,
+        'Parquet': Parquet,
+        'S3Parquet': S3Parquet,
+        'PostgreSQL': PostgreSQL,
+        'DuckDB': DuckDB,
     }
     connector_class = connector_map.get(config['type'])
     if not connector_class:
