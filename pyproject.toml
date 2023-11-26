@@ -35,7 +35,7 @@ pyyaml = "^6.0.1"
 
 [tool.poetry.scripts]
 dbqt = "dbqt.app:main"
-colcompare = "dbqt.tools.column_compare:main"
+colcompare = "dbqt.tools.colcompare:main"
 dbstats = "dbqt.tools.dbstats:main"
 
 [tool.poetry.group.dev.dependencies]
