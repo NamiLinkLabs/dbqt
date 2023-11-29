@@ -78,7 +78,7 @@ class DBConnector(ABC):
         self.logger.info(f"Table {table_name} generated successfully")
 
 
-class MySQLDataConnector(DBConnector):
+class MySQL(DBConnector):
     @property
     def connection_details(self):
         conn_str = f"mysql://{self.config['user']}:{self.config['password']}@{self.config['host']}:{self.config.get('port', '3306')}/{self.config.get('database', 'information_schema')}"
@@ -240,7 +240,7 @@ class PostgreSQL(DBConnector):
 
 def create_connector(config):
     connector_map = {
-        'MySQL': MySQLDataConnector,
+        'MySQL': MySQL,
         'Snowflake': Snowflake,
         'CSV': CSV,
         'Parquet': Parquet,

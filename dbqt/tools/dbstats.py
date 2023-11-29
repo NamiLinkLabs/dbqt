@@ -1,7 +1,7 @@
 import yaml
 import pandas as pd
 import logging
-from dbqt.connections import get_connector
+from dbqt.connections import create_connector
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -15,14 +15,14 @@ def get_table_stats(config_path: str):
     tables_df = pd.read_csv(config['tables_file'])
     
     # Connect to database
-    connector = get_connector(config['connection'])
+    connector = create_connector(config['connection'])
     connector.connect()
     
     # Get row counts
     row_counts = []
     for table in tables_df['table_name']:
         try:
-            count = connector.get_row_count(table)
+            count = connector.count_rows(table)
             row_counts.append(count)
             logger.info(f"Table {table}: {count} rows")
         except Exception as e:
