@@ -37,13 +37,17 @@ def get_table_stats(config_path: str):
     
     logger.info(f"Updated row counts in {config['tables_file']}")
 
-def main():
+def main(args=None):
     import sys
-    if len(sys.argv) != 2:
-        print("Usage: dbstats <config_file>")
-        sys.exit(1)
+    if args is None:
+        if len(sys.argv) != 2:
+            print("Usage: dbqt dbstats <config_file>")
+            sys.exit(1)
+        config_path = sys.argv[1]
+    else:
+        config_path = args[0] if isinstance(args, list) else args
         
-    get_table_stats(sys.argv[1])
+    get_table_stats(config_path)
 
 if __name__ == "__main__":
     main()

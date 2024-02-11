@@ -204,12 +204,13 @@ def create_excel_report(comparison_results, source_df, target_df):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     wb.save(f"results/results_{timestamp}.xlsx")
 
-def main():
-    # Set up argument parser
-    parser = argparse.ArgumentParser(description='Compare columns between two CSV files')
-    parser.add_argument('source', help='Path to the source CSV file')
-    parser.add_argument('target', help='Path to the target CSV file')
-    args = parser.parse_args()
+def main(args):
+    if isinstance(args, (list, type(None))):
+        # Called from command line
+        parser = argparse.ArgumentParser(description='Compare columns between two CSV files')
+        parser.add_argument('source', help='Path to the source CSV file')
+        parser.add_argument('target', help='Path to the target CSV file')
+        args = parser.parse_args(args)
 
     # Read source and target files
     source_df, target_df = read_csv_files(args.source, args.target)
