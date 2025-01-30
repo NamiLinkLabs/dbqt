@@ -1,0 +1,49 @@
+[tool.poetry]
+name = "dbqt"
+version = "0.1.1"
+description = "DataBase Quality Tool"
+authors = ["NamiLink"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/namilinklabs/dbqt"
+documentation = "https://github.com/namilinklabs/dbqt"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Quality Assurance",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: OS Independent",
+]
+
+packages = [{include = "dbqt"}]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.dependencies]
+python = "^3.9"
+sqeleton = "0.1.7"
+
+[tool.poetry.scripts]
+declutrr = "dbqt.app:main"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "*"
+pytest-cov = "*"
+build = "*"
+twine = "*"
+
+[tool.pytest]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v"
+
+
