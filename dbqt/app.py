@@ -12,10 +12,10 @@ def main():
     command = sys.argv[1]
     args = sys.argv[2:]
 
-    if command == "colcompare":
+    if command in ["colcompare", "compare"]:
         from dbqt.tools import colcompare
         colcompare.main(args)
-    elif command == "dbstats":
+    elif command in ["dbstats", "rowcount"]:
         from dbqt.tools import dbstats
         dbstats.main(args)
     else:
