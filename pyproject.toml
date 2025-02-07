@@ -37,8 +37,6 @@ boto3 = "^1.28.30"
 
 [tool.poetry.scripts]
 dbqt = "dbqt.app:main"
-colcompare = "dbqt.tools.colcompare:main"
-dbstats = "dbqt.tools.dbstats:main"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "*"

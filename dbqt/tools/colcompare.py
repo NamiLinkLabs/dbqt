@@ -49,7 +49,7 @@ def read_csv_files(source_path, target_path):
 
 def compare_tables(source_df, target_df):
     """Compare tables between source and target"""
-    source_tables = set(source_df['name'].unique())
+    source_tables = set(source_df['NAME'].unique())
     target_tables = set(target_df['NAME'].unique())
     
     common_tables = source_tables.intersection(target_tables)
@@ -64,18 +64,12 @@ def compare_tables(source_df, target_df):
 
 def compare_columns(source_df, target_df, table_name):
     """Compare columns for a specific table"""
-    source_cols = source_df.filter(pl.col('name') == table_name).select(['col_name', 'data_type', 'ordinal_position'])
+    source_cols = source_df.filter(pl.col('NAME') == table_name).select(['COL_NAME', 'DATA_TYPE', 'ORDINAL_POSITION'])
     target_cols = target_df.filter(pl.col('NAME') == table_name).select(['COL_NAME', 'DATA_TYPE', 'ORDINAL_POSITION'])
-    
-    # Rename target columns to match source
-    target_cols = target_cols.rename({
-        'COL_NAME': 'col_name',
-        'DATA_TYPE': 'data_type',
-        'ORDINAL_POSITION': 'ordinal_position'
-    })
-    
-    source_cols_set = set(source_cols['col_name'].to_list())
-    target_cols_set = set(target_cols['col_name'].to_list())
+
+
+    source_cols_set = set(source_cols['COL_NAME'].to_list())
+    target_cols_set = set(target_cols['COL_NAME'].to_list())
     
     common_cols = source_cols_set.intersection(target_cols_set)
     source_only = source_cols_set - target_cols_set
@@ -84,8 +78,8 @@ def compare_columns(source_df, target_df, table_name):
     # Compare data types for common columns
     datatype_mismatches = []
     for col in common_cols:
-        source_type = source_cols.filter(pl.col('col_name') == col)['data_type'].item()
-        target_type = target_cols.filter(pl.col('col_name') == col)['data_type'].item()
+        source_type = source_cols.filter(pl.col('COL_NAME') == col)['DATA_TYPE'].item()
+        target_type = target_cols.filter(pl.col('COL_NAME') == col)['DATA_TYPE'].item()
         if not are_types_compatible(source_type, target_type):
             datatype_mismatches.append({
                 'column': col,
@@ -150,11 +144,11 @@ def create_excel_report(comparison_results, source_df, target_df):
     
     for table in comparison_results['columns']:
         # Get all columns from source and target for this table
-        source_cols = source_df.filter(pl.col('name') == table['table_name']).select(['col_name', 'data_type'])
+        source_cols = source_df.filter(pl.col('NAME') == table['table_name']).select(['COL_NAME', 'DATA_TYPE'])
         target_cols = target_df.filter(pl.col('NAME') == table['table_name']).select(['COL_NAME', 'DATA_TYPE'])
         
         # Create dictionaries for easy lookup
-        source_types = dict(zip(source_cols['col_name'], source_cols['data_type']))
+        source_types = dict(zip(source_cols['COL_NAME'], source_cols['DATA_TYPE']))
         target_types = dict(zip(target_cols['COL_NAME'], target_cols['DATA_TYPE']))
         
         # Process all columns

@@ -19,6 +19,21 @@ Usage:
 dbqt compare source_schema.csv target_schema.csv
 ```
 
+To generate the required CSV schema files from your database, run this query:
+```sql
+SELECT
+    upper(table_schema) as sch,
+    upper(table_name) as name,
+    upper(column_name) as col_name,
+    upper(data_type) as data_type,
+    ordinal_position
+FROM information_schema.columns
+where table_schema = 'YOUR_SCHEMA'
+order by table_name, ordinal_position;
+```
+
+Export the results to CSV format to use with the compare tool.
+
 ### Database Statistics Tool (dbqt dbstats)
 Collect and analyze database statistics:
 - Table row counts
@@ -29,6 +44,37 @@ Usage:
 ```bash
 dbqt dbstats config.yaml
 ```
+
+Example config.yaml:
+```yaml
+# Database connection configuration
+connection:
+  type: mysql  # mysql, snowflake, duckdb, csv, parquet, s3parquet
+  host: localhost
+  user: myuser
+  password: mypassword
+  database: mydb
+  # Optional AWS configs for s3parquet
+  # aws_profile: default
+  # aws_region: us-west-2
+  # bucket: my-bucket
+
+  # Snowflake-specific configs
+  # type: snowflake
+  # account: your_account.region
+  # warehouse: YOUR_WAREHOUSE
+  # database: YOUR_DB
+  # schema: YOUR_SCHEMA
+  # role: YOUR_ROLE
+  # authenticator: externalbrowser  # Optional: use SSO authentication
+  # user: your_username
+  # password: your_password  # Not needed if using externalbrowser auth
+
+# Path to CSV file containing table names to analyze
+tables_file: tables.csv
+```
+
+The tables.csv file should contain at minimum a `table_name` column. The tool will add/update a `row_count` column with the results.
 
 ## 🚀 Future Plans
 
