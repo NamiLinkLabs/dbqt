@@ -22,13 +22,13 @@ dbqt compare source_schema.csv target_schema.csv
 To generate the required CSV schema files from your database, run this query:
 ```sql
 SELECT
-    upper(table_schema) as sch,
-    upper(table_name) as name,
-    upper(column_name) as col_name,
-    upper(data_type) as data_type,
-    ordinal_position
+    upper(table_schema) as SCH,
+    upper(table_name) as NAME,
+    upper(column_name) as COL_NAME,
+    upper(data_type) as DATA_TYPE,
+    ordinal_position as ORDINAL_POSITION
 FROM information_schema.columns
-where table_schema = 'YOUR_SCHEMA'
+where UPPER(table_schema) = UPPER('YOUR_SCHEMA')
 order by table_name, ordinal_position;
 ```
 
