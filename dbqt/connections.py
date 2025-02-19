@@ -22,12 +22,12 @@ class DBConnector(ABC):
     def connection_details(self):
         pass
 
-    def establish_connection(self):
+    def connect(self):
         self.logger.info(f"Establishing connection to {self.conn_type}")
         self.connection = reladiff_connect(self.connection_details)
         self.logger.info(f"Connection established to {self.conn_type}")
 
-    def close_connection(self):
+    def disconnect(self):
         if self.connection:
             self.logger.info(f"Terminating connection to {self.conn_type}")
             self.connection.close()
@@ -141,8 +141,8 @@ class DuckDB(DBConnector):
 
 
 class CSV(DuckDB):
-    def establish_connection(self):
-        super().establish_connection()
+    def connect(self):
+        super().connect()
         self.config['table'] = f"data{self.config.get('prefix', '')}"
         self.logger.info(f"Creating table from CSV source: {self.config['file']}")
         self.generate_table_from_query(
@@ -152,8 +152,8 @@ class CSV(DuckDB):
 
 
 class Parquet(DuckDB):
-    def establish_connection(self):
-        super().establish_connection()
+    def connect(self):
+        super().connect()
         self.config['table'] = f"data{self.config.get('prefix', '')}"
         self.logger.info(f"Creating table from Parquet source: {self.config['file']}")
         self.generate_table_from_query(
@@ -218,13 +218,13 @@ class S3Parquet(Parquet):
                         raise FileNotFoundError(reply)
             raise
 
-    def establish_connection(self):
+    def connect(self):
         local_path = os.path.join(os.getcwd(), '/tmp/temp.parquet')
         downloaded_path = self.fetch_parquet_from_s3(self.bucket, self.key, local_path)
 
         if downloaded_path:
             self.config['file'] = downloaded_path
-            super().establish_connection()
+            super().connect()
             os.remove(downloaded_path)
         else:
             raise Exception("Failed to fetch parquet file from S3")

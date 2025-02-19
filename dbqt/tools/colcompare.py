@@ -1,6 +1,8 @@
 import argparse
 import polars as pl
 import re
+import pyarrow
+import pyarrow.parquet as pq
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
@@ -41,10 +43,104 @@ def are_types_compatible(type1, type2):
     
     return False
 
-def read_csv_files(source_path, target_path):
-    """Read source and target CSV files using Polars"""
-    source_df = pl.read_csv(source_path)
-    target_df = pl.read_csv(target_path)
+def _process_nested_type(field_type, parent_name="", processed_fields=None):
+    """Recursively process nested types in Parquet schema"""
+    if processed_fields is None:
+        processed_fields = []
+    
+    # Handle list types
+    if isinstance(field_type, (pyarrow.lib.ListType, pyarrow.lib.LargeListType)):
+        element_type = field_type.value_type
+        if isinstance(element_type, pyarrow.lib.StructType):
+            for nested_field in element_type:
+                full_name = f"{parent_name}__{nested_field.name}" if parent_name else nested_field.name
+                if isinstance(nested_field.type, (pyarrow.lib.ListType, pyarrow.lib.LargeListType, pyarrow.lib.StructType, pyarrow.lib.MapType)):
+                    _process_nested_type(nested_field.type, full_name, processed_fields)
+                else:
+                    processed_fields.append({
+                        'name': full_name,
+                        'type': str(nested_field.type)
+                    })
+        else:
+            processed_fields.append({
+                'name': parent_name,
+                'type': str(field_type)
+            })
+    
+    # Handle struct types
+    elif isinstance(field_type, pyarrow.lib.StructType):
+        for nested_field in field_type:
+            full_name = f"{parent_name}__{nested_field.name}" if parent_name else nested_field.name
+            if isinstance(nested_field.type, (pyarrow.lib.ListType, pyarrow.lib.LargeListType, pyarrow.lib.StructType, pyarrow.lib.MapType)):
+                _process_nested_type(nested_field.type, full_name, processed_fields)
+            else:
+                processed_fields.append({
+                    'name': full_name,
+                    'type': str(nested_field.type)
+                })
+    
+    # Handle map types
+    elif isinstance(field_type, pyarrow.lib.MapType):
+        processed_fields.append({
+            'name': parent_name,
+            'type': str(field_type)
+        })
+    
+    return processed_fields
+
+def compare_and_unnest_parquet_schema(source_path, target_path):
+    """Compare schemas of two Parquet files without loading full dataset"""
+    schema1 = pq.read_schema(source_path)
+    schema2 = pq.read_schema(target_path)
+    
+    # Process both schemas to expand nested fields
+    processed_fields1 = []
+    processed_fields2 = []
+    
+    for field in schema1:
+        if isinstance(field.type, (pyarrow.lib.ListType, pyarrow.lib.LargeListType, pyarrow.lib.StructType, pyarrow.lib.MapType)):
+            processed_fields1.extend(_process_nested_type(field.type, field.name))
+        else:
+            processed_fields1.append({
+                'name': field.name,
+                'type': str(field.type)
+            })
+    
+    for field in schema2:
+        if isinstance(field.type, (pyarrow.lib.ListType, pyarrow.lib.LargeListType, pyarrow.lib.StructType, pyarrow.lib.MapType)):
+            processed_fields2.extend(_process_nested_type(field.type, field.name))
+        else:
+            processed_fields2.append({
+                'name': field.name,
+                'type': str(field.type)
+            })
+    
+    # Convert processed fields to polars DataFrame
+    schema1_df = pl.DataFrame({
+        'NAME': ["pq"] * len(processed_fields1),
+        'COL_NAME': [f['name'] for f in processed_fields1],
+        'DATA_TYPE': [f['type'] for f in processed_fields1],
+        'ORDINAL_POSITION': range(len(processed_fields1))
+    })
+    
+    schema2_df = pl.DataFrame({
+        'NAME': ["pq"] * len(processed_fields2),
+        'COL_NAME': [f['name'] for f in processed_fields2],
+        'DATA_TYPE': [f['type'] for f in processed_fields2],
+        'ORDINAL_POSITION': range(len(processed_fields2))
+    })
+    
+    return schema1_df, schema2_df
+
+def read_files(source_path, target_path):
+    """Read source and target files using Polars"""
+    # Check if files are Parquet
+    if source_path.endswith('.parquet') and target_path.endswith('.parquet'):
+        # For Parquet files, only load the schema information
+        source_df, target_df = compare_and_unnest_parquet_schema(source_path, target_path)
+    else:
+        source_df = pl.read_csv(source_path)
+        target_df = pl.read_csv(target_path)
     return source_df, target_df
 
 def compare_tables(source_df, target_df):
@@ -207,7 +303,7 @@ def main(args):
         args = parser.parse_args(args)
 
     # Read source and target files
-    source_df, target_df = read_csv_files(args.source, args.target)
+    source_df, target_df = read_files(args.source, args.target)
     
     # Compare tables
     table_comparison = compare_tables(source_df, target_df)

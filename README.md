@@ -5,9 +5,12 @@ DBQT is a lightweight, Python-first data quality testing framework that helps da
 ## 🛠️ Current Tools
 
 ### Column Comparison Tool (dbqt compare)
-Compare database schemas between source and target databases:
+Compare schemas between databases or files:
 - Table-level comparison
 - Column-level comparison with data type compatibility checks
+- Support for CSV and Parquet files
+- Handles nested Parquet schemas (arrays, structs, maps)
+- Intelligent data type compatibility checking
 - Generates detailed Excel report with:
   - Table differences
   - Column differences
@@ -17,9 +20,11 @@ Compare database schemas between source and target databases:
 Usage:
 ```bash
 dbqt compare source_schema.csv target_schema.csv
+# Or compare Parquet files directly:
+dbqt compare source.parquet target.parquet
 ```
 
-To generate the required CSV schema files from your database, run this query:
+To generate CSV schema files from your database, run this query:
 ```sql
 SELECT
     upper(table_schema) as SCH,
@@ -33,6 +38,17 @@ order by table_name, ordinal_position;
 ```
 
 Export the results to CSV format to use with the compare tool.
+
+### Parquet Combine Tool (dbqt combine)
+Combine multiple Parquet files into a single file:
+- Validates schema compatibility
+- Preserves nested data structures
+- Handles large datasets efficiently
+
+Usage:
+```bash
+dbqt combine [output.parquet]  # Combines all .parquet files in current directory
+```
 
 ### Database Statistics Tool (dbqt dbstats)
 Collect and analyze database statistics:
