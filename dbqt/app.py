@@ -15,7 +15,7 @@ def main():
 
     if command in ["colcompare", "compare"]:
         from dbqt.tools import colcompare
-        colcompare.main(args)
+        colcompare.colcompare(args)
     elif command in ["dbstats", "rowcount"]:
         from dbqt.tools import dbstats
         dbstats.main(args)

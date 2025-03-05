@@ -20,6 +20,7 @@ TYPE_MAPPINGS = {
     'BOOLEAN': ['BOOLEAN', 'BOOL', 'BIT']
 }
 
+
 def are_types_compatible(type1, type2):
     """Check if two data types are considered compatible"""
     type1, type2 = type1.upper(), type2.upper()
@@ -42,6 +43,7 @@ def are_types_compatible(type1, type2):
             return True
     
     return False
+
 
 def _process_nested_type(field_type, parent_name="", processed_fields=None):
     """Recursively process nested types in Parquet schema"""
@@ -88,6 +90,7 @@ def _process_nested_type(field_type, parent_name="", processed_fields=None):
     
     return processed_fields
 
+
 def compare_and_unnest_parquet_schema(source_path, target_path):
     """Compare schemas of two Parquet files without loading full dataset"""
     schema1 = pq.read_schema(source_path)
@@ -132,6 +135,7 @@ def compare_and_unnest_parquet_schema(source_path, target_path):
     
     return schema1_df, schema2_df
 
+
 def read_files(source_path, target_path):
     """Read source and target files using Polars"""
     # Check if files are Parquet
@@ -142,6 +146,7 @@ def read_files(source_path, target_path):
         source_df = pl.read_csv(source_path)
         target_df = pl.read_csv(target_path)
     return source_df, target_df
+
 
 def compare_tables(source_df, target_df):
     """Compare tables between source and target"""
@@ -157,6 +162,7 @@ def compare_tables(source_df, target_df):
         'source_only': sorted(list(source_only)),
         'target_only': sorted(list(target_only))
     }
+
 
 def compare_columns(source_df, target_df, table_name):
     """Compare columns for a specific table"""
@@ -190,6 +196,7 @@ def compare_columns(source_df, target_df, table_name):
         'datatype_mismatches': datatype_mismatches
     }
 
+
 def format_worksheet(ws):
     """Apply formatting to worksheet"""
     header_fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
@@ -216,7 +223,8 @@ def format_worksheet(ws):
         adjusted_width = min(max_length + 2, 21.6)
         ws.column_dimensions[get_column_letter(column[0].column)].width = adjusted_width
 
-def create_excel_report(comparison_results, source_df, target_df):
+
+def create_excel_report(comparison_results, source_df, target_df, table_name):
     """Create formatted Excel report"""
     wb = Workbook()
     
@@ -292,9 +300,11 @@ def create_excel_report(comparison_results, source_df, target_df):
     # Save the workbook with timestamp
     os.makedirs("results", exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    wb.save(f"results/results_{timestamp}.xlsx")
+    if "/" in table_name:
+        table_name = table_name.split('/')[-1]
+    wb.save(f"results/{table_name}_{timestamp}.xlsx")
 
-def main(args):
+def colcompare(args):
     if isinstance(args, (list, type(None))):
         # Called from command line
         parser = argparse.ArgumentParser(description='Compare columns between two CSV files')
@@ -322,9 +332,9 @@ def main(args):
         'tables': table_comparison,
         'columns': column_comparisons
     }
-    
+    table_name = args.target.split('.')[1].strip('/')
     # Generate Excel report
-    create_excel_report(comparison_results, source_df, target_df)
+    create_excel_report(comparison_results, source_df, target_df, table_name)
 
 if __name__ == "__main__":
-    main()
+    colcompare()
