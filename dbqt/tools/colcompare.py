@@ -307,9 +307,20 @@ def create_excel_report(comparison_results, source_df, target_df, table_name):
 def colcompare(args):
     if isinstance(args, (list, type(None))):
         # Called from command line
-        parser = argparse.ArgumentParser(description='Compare columns between two CSV files')
-        parser.add_argument('source', help='Path to the source CSV file')
-        parser.add_argument('target', help='Path to the target CSV file')
+        parser = argparse.ArgumentParser(
+            description='Compare column schemas between two CSV or Parquet files',
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog="""
+Generates an Excel report with three sheets:
+- Table Comparison: Lists tables present in source/target
+- Column Comparison: Details of column presence and type matching
+- Datatype Mismatches: Highlights columns with incompatible types
+
+The report is saved to ./results/ with a timestamp in the filename.
+            """
+        )
+        parser.add_argument('source', help='Path to the source CSV/Parquet file')
+        parser.add_argument('target', help='Path to the target CSV/Parquet file')
         args = parser.parse_args(args)
 
     # Read source and target files

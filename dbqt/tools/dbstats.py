@@ -38,16 +38,28 @@ def get_table_stats(config_path: str):
     logger.info(f"Updated row counts in {config['tables_file']}")
 
 def main(args=None):
-    import sys
+    import argparse
+    parser = argparse.ArgumentParser(
+        description='Get row counts for database tables specified in a config file',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Example config.yaml:
+    connection:
+        type: snowflake
+        user: myuser
+        password: mypass
+        host: myorg.snowflakecomputing.com
+    tables_file: tables.csv
+        """
+    )
+    parser.add_argument('config_file', help='YAML config file containing database connection and tables list')
+    
     if args is None:
-        if len(sys.argv) != 2:
-            print("Usage: dbqt dbstats <config_file>")
-            sys.exit(1)
-        config_path = sys.argv[1]
+        args = parser.parse_args()
     else:
-        config_path = args[0] if isinstance(args, list) else args
-        
-    get_table_stats(config_path)
+        args = parser.parse_args(args)
+    
+    get_table_stats(args.config_file)
 
 if __name__ == "__main__":
     main()
