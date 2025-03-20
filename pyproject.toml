@@ -1,6 +1,6 @@
 [project]
 name = "dbqt"
-version = "0.1.5"
+version = "0.1.6"
 description = "DataBase Quality Tool"
 authors = [
     { name = "NamiLink" }
@@ -44,6 +44,13 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["dbqt"]
 
+[tool.hatch.build.targets.sdist]
+include = [
+    "README.md",
+    "pyproject.toml",
+    "dbqt/**/*",
+]
+
 [tool.pytest]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
@@ -57,4 +64,5 @@ dev = [
     "pytest-cov",
     "build",
     "twine",
+    "check-manifest>=0.50",
 ]
