@@ -4,6 +4,7 @@ import logging
 from typing import Optional
 
 import boto3
+import time
 from tqdm import tqdm
 from sqeleton import table
 from reladiff import connect as reladiff_connect
@@ -18,7 +19,7 @@ class DBConnector(ABC):
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
         self.conn_type = config.get('type', 'N/A')
 
-    @abstractmethod
+    # @abstractmethod
     def connection_details(self):
         pass
 
@@ -238,6 +239,77 @@ class PostgreSQL(DBConnector):
         return conn_str
 
 
+class Athena(DBConnector):
+    def __init__(self, config):
+        super().__init__(config)
+        self.session = boto3.Session(
+            profile_name=config.get('aws_profile', 'default')
+        )
+        self.aws_region = config.get('aws_region', 'us-east-1')
+        self.workgroup = config.get('workgroup', 'primary')
+        self.output_location = config.get('output_location','')
+        self.athena_client = self.session.client('athena', region_name=self.aws_region)
+
+    def connect(self):
+        self.logger.info("Athena connection established")
+        
+    def disconnect(self):
+        self.logger.info("Athena connection terminated")
+
+    def run_query(self, query):
+        self.logger.info(f"Running Athena query: {query[:300]}")
+        
+        # Start query execution
+        response = self.athena_client.start_query_execution(
+            QueryString=query,
+            QueryExecutionContext={
+                'Database': self.config.get('database', ''),
+                'Catalog': self.config.get('catalog', 'AwsDataCatalog')
+            },
+            ResultConfiguration={
+                'OutputLocation': self.output_location
+            },
+            WorkGroup=self.workgroup
+        )
+        
+        query_execution_id = response['QueryExecutionId']
+        
+        # Wait for query to complete with exponential backoff
+        wait_time = 1  # Start with 1 second
+        while True:
+            query_status = self.athena_client.get_query_execution(
+                QueryExecutionId=query_execution_id
+            )['QueryExecution']['Status']
+            
+            state = query_status['State']
+            
+            if state in ['SUCCEEDED', 'FAILED', 'CANCELLED']:
+                if state == 'FAILED':
+                    reason = query_status.get('StateChangeReason', 'Unknown error')
+                    raise Exception(f"Query failed: {reason}")
+                elif state == 'CANCELLED':
+                    raise Exception("Query was cancelled")
+                break
+            
+            # Exponential backoff with max of 10 seconds
+            time.sleep(wait_time)
+            wait_time = min(10, wait_time * 5)  # 1s -> 5s -> 10s -> 10s -> ...
+            
+        # Get query results
+        results = []
+        paginator = self.athena_client.get_paginator('get_query_results')
+        
+        try:
+            for page in paginator.paginate(QueryExecutionId=query_execution_id):
+                for row in page['ResultSet']['Rows'][1:]:  # Skip header row
+                    results.append([field.get('VarCharValue') for field in row['Data']])
+        except Exception as e:
+            self.logger.error(f"Error fetching results: {str(e)}")
+            raise
+            
+        return results
+
+
 def create_connector(config):
     connector_map = {
         'MySQL': MySQL,
@@ -247,6 +319,7 @@ def create_connector(config):
         'S3Parquet': S3Parquet,
         'PostgreSQL': PostgreSQL,
         'DuckDB': DuckDB,
+        'Athena': Athena,
     }
     connector_class = connector_map.get(config['type'])
     if not connector_class:
@@ -254,3 +327,4 @@ def create_connector(config):
         raise ValueError(f"Unsupported connector type: {config['type']}")
     logger.info(f"Initializing connector for type: {config['type']}")
     return connector_class(config)
+
