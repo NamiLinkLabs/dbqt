@@ -247,7 +247,6 @@ class Athena(DBConnector):
         )
         self.aws_region = config.get('aws_region', 'us-east-1')
         self.workgroup = config.get('workgroup', 'primary')
-        self.output_location = config.get('output_location','')
         self.athena_client = self.session.client('athena', region_name=self.aws_region)
 
     def connect(self):
@@ -265,9 +264,6 @@ class Athena(DBConnector):
             QueryExecutionContext={
                 'Database': self.config.get('database', ''),
                 'Catalog': self.config.get('catalog', 'AwsDataCatalog')
-            },
-            ResultConfiguration={
-                'OutputLocation': self.output_location
             },
             WorkGroup=self.workgroup
         )

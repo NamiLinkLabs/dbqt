@@ -2,10 +2,26 @@ import os
 import argparse
 from pathlib import Path
 
+def is_parquet_file(filepath):
+    """
+    Check if the file at filepath is an Apache Parquet file by reading its magic bytes.
+    Returns True if it is, False otherwise.
+    """
+    try:
+        with open(filepath, "rb") as f:
+            magic = f.read(4)
+            if magic != b'PAR1':
+                return False
+            f.seek(-4, os.SEEK_END)
+            magic_end = f.read(4)
+            return magic_end == b'PAR1'
+    except Exception:
+        return False
+
 def add_parquet_extension(path):
     """
     Recursively find files without extensions (excluding hidden files) 
-    and add .parquet extension
+    and add .parquet extension if the file is an Apache Parquet file.
     """
     path = Path(path)
     count = 0
@@ -15,12 +31,15 @@ def add_parquet_extension(path):
         if item.is_dir() or item.name.startswith('.'):
             continue
             
-        # If file has no suffix, add .parquet
+        # If file has no suffix, check if it's a Parquet file
         if not item.suffix:
-            new_name = item.with_suffix('.parquet')
-            item.rename(new_name)
-            print(f"Renamed: {item} -> {new_name}")
-            count += 1
+            if is_parquet_file(item):
+                new_name = item.with_suffix('.parquet')
+                item.rename(new_name)
+                print(f"Renamed: {item} -> {new_name}")
+                count += 1
+            else:
+                print(f"Skipped (not Parquet): {item}")
     
     if count > 0:
         print(f"\nAdded .parquet extension to {count} files")
