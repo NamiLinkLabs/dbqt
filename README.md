@@ -27,11 +27,10 @@ dbqt compare source.parquet target.parquet
 To generate CSV schema files from your database, run this query:
 ```sql
 SELECT
-    upper(table_schema) as SCH,
-    upper(table_name) as NAME,
+    upper(table_schema) as SCH, --optional
+    upper(table_name) as TABLE_NAME,
     upper(column_name) as COL_NAME,
-    upper(data_type) as DATA_TYPE,
-    ordinal_position as ORDINAL_POSITION
+    upper(data_type) as DATA_TYPE --optional
 FROM information_schema.columns
 where UPPER(table_schema) = UPPER('YOUR_SCHEMA')
 order by table_name, ordinal_position;

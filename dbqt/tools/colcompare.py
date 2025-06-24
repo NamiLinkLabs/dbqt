@@ -60,15 +60,15 @@ def _process_nested_type(field_type, parent_name="", processed_fields=None):
                     _process_nested_type(nested_field.type, full_name, processed_fields)
                 else:
                     processed_fields.append({
-                        'name': full_name,
+                        'col_name': full_name,
                         'type': str(nested_field.type)
                     })
         else:
             processed_fields.append({
-                'name': parent_name,
+                'col_name': parent_name,
                 'type': str(field_type)
             })
-    
+
     # Handle struct types
     elif isinstance(field_type, pyarrow.lib.StructType):
         for nested_field in field_type:
@@ -77,17 +77,17 @@ def _process_nested_type(field_type, parent_name="", processed_fields=None):
                 _process_nested_type(nested_field.type, full_name, processed_fields)
             else:
                 processed_fields.append({
-                    'name': full_name,
+                    'col_name': full_name,
                     'type': str(nested_field.type)
                 })
-    
+
     # Handle map types
     elif isinstance(field_type, pyarrow.lib.MapType):
         processed_fields.append({
-            'name': parent_name,
+            'col_name': parent_name,
             'type': str(field_type)
         })
-    
+
     return processed_fields
 
 
@@ -95,44 +95,42 @@ def compare_and_unnest_parquet_schema(source_path, target_path):
     """Compare schemas of two Parquet files without loading full dataset"""
     schema1 = pq.read_schema(source_path)
     schema2 = pq.read_schema(target_path)
-    
+
     # Process both schemas to expand nested fields
     processed_fields1 = []
     processed_fields2 = []
-    
+
     for field in schema1:
         if isinstance(field.type, (pyarrow.lib.ListType, pyarrow.lib.LargeListType, pyarrow.lib.StructType, pyarrow.lib.MapType)):
             processed_fields1.extend(_process_nested_type(field.type, field.name))
         else:
             processed_fields1.append({
-                'name': field.name,
+                'col_name': field.name,
                 'type': str(field.type)
             })
-    
+
     for field in schema2:
         if isinstance(field.type, (pyarrow.lib.ListType, pyarrow.lib.LargeListType, pyarrow.lib.StructType, pyarrow.lib.MapType)):
             processed_fields2.extend(_process_nested_type(field.type, field.name))
         else:
             processed_fields2.append({
-                'name': field.name,
+                'col_name': field.name,
                 'type': str(field.type)
             })
-    
+
     # Convert processed fields to polars DataFrame
     schema1_df = pl.DataFrame({
-        'NAME': ["pq"] * len(processed_fields1),
-        'COL_NAME': [f['name'] for f in processed_fields1],
-        'DATA_TYPE': [f['type'] for f in processed_fields1],
-        'ORDINAL_POSITION': range(len(processed_fields1))
+        'SCH_TABLE': ["pq"] * len(processed_fields1),
+        'COL_NAME': [f['col_name'] for f in processed_fields1],
+        'DATA_TYPE': [f['type'] for f in processed_fields1]
     })
-    
+
     schema2_df = pl.DataFrame({
-        'NAME': ["pq"] * len(processed_fields2),
-        'COL_NAME': [f['name'] for f in processed_fields2],
-        'DATA_TYPE': [f['type'] for f in processed_fields2],
-        'ORDINAL_POSITION': range(len(processed_fields2))
+        'SCH_TABLE': ["pq"] * len(processed_fields2),
+        'COL_NAME': [f['col_name'] for f in processed_fields2],
+        'DATA_TYPE': [f['type'] for f in processed_fields2]
     })
-    
+
     return schema1_df, schema2_df
 
 
@@ -145,13 +143,31 @@ def read_files(source_path, target_path):
     else:
         source_df = pl.read_csv(source_path)
         target_df = pl.read_csv(target_path)
+
+        # Handle missing DATA_TYPE column
+        if 'DATA_TYPE' not in source_df.columns:
+            source_df = source_df.with_columns(pl.lit("N/A").alias('DATA_TYPE'))
+        if 'DATA_TYPE' not in target_df.columns:
+            target_df = target_df.with_columns(pl.lit("N/A").alias('DATA_TYPE'))
+
+        # Create SCH_TABLE column - concatenate SCH and NAME if SCH exists, otherwise use NAME
+        if 'SCH' in source_df.columns:
+            source_df = source_df.with_columns(pl.concat_str([pl.col('SCH'), pl.lit('.'), pl.col('TABLE_NAME')]).alias('SCH_TABLE'))
+        else:
+            source_df = source_df.with_columns(pl.col('TABLE_NAME').alias('SCH_TABLE'))
+
+        if 'SCH' in target_df.columns:
+            target_df = target_df.with_columns(pl.concat_str([pl.col('SCH'), pl.lit('.'), pl.col('TABLE_NAME')]).alias('SCH_TABLE'))
+        else:
+            target_df = target_df.with_columns(pl.col('TABLE_NAME').alias('SCH_TABLE'))
+            
     return source_df, target_df
 
 
 def compare_tables(source_df, target_df):
     """Compare tables between source and target"""
-    source_tables = set(source_df['NAME'].unique())
-    target_tables = set(target_df['NAME'].unique())
+    source_tables = set(source_df['SCH_TABLE'].unique())
+    target_tables = set(target_df['SCH_TABLE'].unique())
     
     common_tables = source_tables.intersection(target_tables)
     source_only = source_tables - target_tables
@@ -166,9 +182,8 @@ def compare_tables(source_df, target_df):
 
 def compare_columns(source_df, target_df, table_name):
     """Compare columns for a specific table"""
-    source_cols = source_df.filter(pl.col('NAME') == table_name).select(['COL_NAME', 'DATA_TYPE', 'ORDINAL_POSITION'])
-    target_cols = target_df.filter(pl.col('NAME') == table_name).select(['COL_NAME', 'DATA_TYPE', 'ORDINAL_POSITION'])
-
+    source_cols = source_df.filter(pl.col('SCH_TABLE') == table_name).select(['COL_NAME', 'DATA_TYPE'])
+    target_cols = target_df.filter(pl.col('SCH_TABLE') == table_name).select(['COL_NAME', 'DATA_TYPE'])
 
     source_cols_set = set(source_cols['COL_NAME'].to_list())
     target_cols_set = set(target_cols['COL_NAME'].to_list())
@@ -248,8 +263,9 @@ def create_excel_report(comparison_results, source_df, target_df, table_name):
     
     for table in comparison_results['columns']:
         # Get all columns from source and target for this table
-        source_cols = source_df.filter(pl.col('NAME') == table['table_name']).select(['COL_NAME', 'DATA_TYPE'])
-        target_cols = target_df.filter(pl.col('NAME') == table['table_name']).select(['COL_NAME', 'DATA_TYPE'])
+        table_name = table['table_name']
+        source_cols = source_df.filter(pl.col('SCH_TABLE') == table_name).select(['COL_NAME', 'DATA_TYPE'])
+        target_cols = target_df.filter(pl.col('SCH_TABLE') == table_name).select(['COL_NAME', 'DATA_TYPE'])
         
         # Create dictionaries for easy lookup
         source_types = dict(zip(source_cols['COL_NAME'], source_cols['DATA_TYPE']))
