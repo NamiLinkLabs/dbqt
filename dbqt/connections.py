@@ -258,13 +258,19 @@ class Athena(DBConnector):
     def run_query(self, query):
         self.logger.info(f"Running Athena query: {query[:300]}")
         
+        # Build QueryExecutionContext
+        query_context = {
+            'Catalog': self.config.get('catalog', 'AwsDataCatalog')
+        }
+        
+        # Only include Database if it's provided in config
+        if self.config.get('database'):
+            query_context['Database'] = self.config['database']
+        
         # Start query execution
         response = self.athena_client.start_query_execution(
             QueryString=query,
-            QueryExecutionContext={
-                'Database': self.config.get('database', ''),
-                'Catalog': self.config.get('catalog', 'AwsDataCatalog')
-            },
+            QueryExecutionContext=query_context,
             WorkGroup=self.workgroup
         )
         
