@@ -1,0 +1,11 @@
+connection:
+  type: Snowflake
+  user: user
+  password: optional
+  authenticator: externalbrowser
+  account: org-id
+  database: dbname
+  schema: schema_name
+  warehouse: wh_name
+  role: role_name
+tables_file: sf_tables.csv

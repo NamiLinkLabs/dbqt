@@ -1,5 +1,5 @@
 import yaml
-import pandas as pd
+import polars as pl
 import logging
 from dbqt.connections import create_connector
 
@@ -11,8 +11,8 @@ def get_table_stats(config_path: str):
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     
-    # Read tables CSV
-    tables_df = pd.read_csv(config['tables_file'])
+    # Read tables CSV using polars
+    df = pl.read_csv(config['tables_file'])
     
     # Connect to database
     connector = create_connector(config['connection'])
@@ -20,20 +20,20 @@ def get_table_stats(config_path: str):
     
     # Get row counts
     row_counts = []
-    for table in tables_df['table_name']:
+    for table_name in df['table_name']:
         try:
-            count = connector.count_rows(table)
+            count = connector.count_rows(table_name)
             row_counts.append(count)
-            logger.info(f"Table {table}: {count} rows")
+            logger.info(f"Table {table_name}: {count} rows")
         except Exception as e:
-            logger.error(f"Error getting count for {table}: {str(e)}")
+            logger.error(f"Error getting count for {table_name}: {str(e)}")
             row_counts.append(-1)
     
     connector.disconnect()
     
-    # Update CSV with row counts
-    tables_df['row_count'] = row_counts
-    tables_df.to_csv(config['tables_file'], index=False)
+    # Add row counts to dataframe and save
+    df = df.with_columns(pl.Series("row_count", row_counts))
+    df.write_csv(config['tables_file'])
     
     logger.info(f"Updated row counts in {config['tables_file']}")
 
@@ -45,7 +45,7 @@ def main(args=None):
         epilog="""
 Example config.yaml:
     connection:
-        type: snowflake
+        type: Snowflake
         user: myuser
         password: mypass
         host: myorg.snowflakecomputing.com
