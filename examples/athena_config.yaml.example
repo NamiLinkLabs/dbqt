@@ -1,0 +1,6 @@
+connection:
+  type: Athena
+  aws_profile: default
+  aws_region: us-west-2
+  workgroup: primary
+tables_file: athena_tables.csv

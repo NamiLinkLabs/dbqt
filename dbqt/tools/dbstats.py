@@ -1,25 +1,28 @@
 import yaml
 import polars as pl
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dbqt.connections import create_connector
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - [%(threadName)s] - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-def get_row_count_for_table(config, table_name):
-    """Get row count for a single table using its own connector."""
-    connector = create_connector(config['connection'])
+def get_row_count_for_table(connector, table_name):
+    """Get row count for a single table using a shared connector."""
+    # Set a more descriptive thread name
+    threading.current_thread().name = f"Table-{table_name}"
+    
     try:
-        connector.connect()
         count = connector.count_rows(table_name)
         logger.info(f"Table {table_name}: {count} rows")
         return table_name, count
     except Exception as e:
         logger.error(f"Error getting count for {table_name}: {str(e)}")
         return table_name, -1
-    finally:
-        connector.disconnect()
 
 def get_table_stats(config_path: str):
     # Load config
@@ -30,19 +33,40 @@ def get_table_stats(config_path: str):
     df = pl.read_csv(config['tables_file'])
     table_names = df['table_name'].to_list()
     
-    # Use ThreadPoolExecutor to process up to 10 tables concurrently
-    row_counts = {}
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        # Submit all tasks
-        future_to_table = {
-            executor.submit(get_row_count_for_table, config, table_name): table_name 
-            for table_name in table_names
-        }
-        
-        # Collect results as they complete
-        for future in as_completed(future_to_table):
-            table_name, count = future.result()
-            row_counts[table_name] = count
+    # Create a pool of 10 connectors that will be reused
+    max_workers = 10
+    connectors = []
+    
+    logger.info(f"Creating {max_workers} database connections...")
+    for i in range(max_workers):
+        connector = create_connector(config['connection'])
+        connector.connect()
+        connectors.append(connector)
+    
+    try:
+        # Use ThreadPoolExecutor with shared connectors
+        row_counts = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks, cycling through available connectors
+            future_to_table = {}
+            for i, table_name in enumerate(table_names):
+                connector = connectors[i % max_workers]  # Round-robin assignment
+                future = executor.submit(get_row_count_for_table, connector, table_name)
+                future_to_table[future] = table_name
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_table):
+                table_name, count = future.result()
+                row_counts[table_name] = count
+    
+    finally:
+        # Clean up all connections
+        logger.info("Closing database connections...")
+        for connector in connectors:
+            try:
+                connector.disconnect()
+            except Exception as e:
+                logger.warning(f"Error closing connection: {str(e)}")
     
     # Create ordered list of row counts matching the original table order
     ordered_row_counts = [row_counts[table_name] for table_name in table_names]
