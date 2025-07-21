@@ -311,6 +311,18 @@ class Athena(DBConnector):
             
         return results
 
+    def count_rows(self, table_name, where_clause=None):
+        """Retrieve the total number of rows in a table."""
+        try:
+            query = f"SELECT COUNT(*) FROM {table_name}"
+            if where_clause:
+                query += f" WHERE {where_clause}"
+            result = self.run_query(query)
+            return result[1][0]
+        except Exception as e:
+            self.logger.error(f"Error counting rows for {table_name}: {str(e)}")
+            return None
+
 
 def create_connector(config):
     connector_map = {
