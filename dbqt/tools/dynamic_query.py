@@ -7,7 +7,6 @@ import argparse
 import csv
 import yaml
 import logging
-from pathlib import Path
 from dbqt.connections import create_connector
 
 logger = logging.getLogger(__name__)
