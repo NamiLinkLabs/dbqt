@@ -303,7 +303,7 @@ class Athena(DBConnector):
         
         try:
             for page in paginator.paginate(QueryExecutionId=query_execution_id):
-                for row in page['ResultSet']['Rows'][1:]:  # Skip header row
+                for row in page['ResultSet']['Rows']:
                     results.append([field.get('VarCharValue') for field in row['Data']])
         except Exception as e:
             self.logger.error(f"Error fetching results: {str(e)}")
