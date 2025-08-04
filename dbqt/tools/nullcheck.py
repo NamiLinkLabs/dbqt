@@ -22,28 +22,63 @@ def read_table_list(csv_path: str) -> list:
     tables = []
     with open(csv_path, 'r') as f:
         reader = csv.reader(f)
+        first_row = True
         for row in reader:
             if row and row[0].strip():  # Skip empty rows
+                # Skip header row if first row is "table_name"
+                if first_row and row[0].strip().lower() == 'table_name':
+                    first_row = False
+                    continue
                 tables.append(row[0].strip())
+                first_row = False
     return tables
 
 
-def get_table_columns(connector, table_name: str) -> list:
-    """Get all column names for a table."""
+def get_all_table_columns(connector, tables: list) -> dict:
+    """Get all column names for all tables in a single query."""
     try:
-        metadata = connector.fetch_table_metadata(table_name)
-        return [col[0] for col in metadata]  # Return just column names
+        # Get database and schema from connector config
+        database = connector.config['database']
+        schema = connector.config['schema']
+        
+        # Create a single query to get all columns for all tables
+        table_list = "', '".join(tables)
+        query = f"""
+        SELECT UPPER(TABLE_NAME) AS TABLE_NAME, UPPER(COLUMN_NAME) AS COLUMN_NAME, DATA_TYPE
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE 
+        UPPER(TABLE_CATALOG) = UPPER('{database}') 
+        AND UPPER(TABLE_SCHEMA) = UPPER('{schema}') 
+        AND UPPER(TABLE_NAME) IN ('{table_list}')
+        ORDER BY TABLE_NAME, ORDINAL_POSITION
+        """
+        
+        logger.info(f"Fetching metadata for {len(tables)} tables in single query")
+        result = connector.run_query(query)
+        
+        # Organize results by table
+        table_columns = {}
+        if result and result.rows:
+            for row in result.rows:  # Process all data rows
+                table_name = row[0]
+                column_name = row[1]
+                if table_name not in table_columns:
+                    table_columns[table_name] = []
+                table_columns[table_name].append(column_name)
+        
+        return table_columns
+        
     except Exception as e:
-        logger.error(f"Error getting columns for {table_name}: {str(e)}")
-        return []
+        logger.error(f"Error getting columns for all tables: {str(e)}")
+        return {}
 
 
 def check_null_columns(connector, table_name: str, columns: list) -> dict:
     """
-    Check which columns in a table have all null values using a single optimized query.
+    Check which columns in a table have all null values and get distinct value counts.
 
     Returns:
-        dict: {column_name: is_all_null, ...}
+        dict: {column_name: {'is_all_null': bool, 'distinct_count': int}, ...}
     """
     results = {}
 
@@ -51,7 +86,7 @@ def check_null_columns(connector, table_name: str, columns: list) -> dict:
         logger.warning(f"No columns found for table {table_name}")
         return results
 
-    # Build a single query that counts distinct non-null values for all columns
+    # Build a single query that counts distinct values for all columns
     # This is much more efficient than multiple queries
     distinct_checks = []
     for col in columns:
@@ -64,12 +99,15 @@ def check_null_columns(connector, table_name: str, columns: list) -> dict:
 
     try:
         result = connector.run_query(query)
-        if result and len(result) > 1:  # Skip header row
-            row = result[1]  # First data row
+        if result and result.rows:  # Check if we have data rows
+            row = result.rows[0]  # First data row
             for i, col in enumerate(columns):
                 distinct_count = int(row[i]) if row[i] else 0
                 # If distinct count is 0, all values are null
-                results[col] = distinct_count == 0
+                results[col] = {
+                    'is_all_null': distinct_count == 0,
+                    'distinct_count': distinct_count
+                }
 
     except Exception as e:
         logger.error(f"Error checking null columns for {table_name}: {str(e)}")
@@ -86,17 +124,20 @@ def check_null_columns(connector, table_name: str, columns: list) -> dict:
             """
             
             result = connector.run_query(fallback_query)
-            if result and len(result) > 1:
-                row = result[1]
+            if result and result.rows:
+                row = result.rows[0]
                 for i, col in enumerate(columns):
                     not_null_count = int(row[i]) if row[i] else 0
-                    results[col] = not_null_count == 0
+                    results[col] = {
+                        'is_all_null': not_null_count == 0,
+                        'distinct_count': 0 if not_null_count == 0 else None  # Can't determine exact distinct count with fallback
+                    }
             
         except Exception as fallback_e:
             logger.error(f"Fallback query also failed for {table_name}: {str(fallback_e)}")
             # Mark all columns as unknown
             for col in columns:
-                results[col] = None
+                results[col] = {'is_all_null': None, 'distinct_count': None}
 
     return results
 
@@ -112,6 +153,9 @@ def check_tables_for_null_columns(connector, tables: list, output_file: str) -> 
     """
     logger.info(f"Checking {len(tables)} tables for null columns")
 
+    # Get all column metadata in a single query
+    all_table_columns = get_all_table_columns(connector, tables)
+    
     all_null_columns = []
 
     with open(output_file, 'w') as f:
@@ -122,12 +166,12 @@ def check_tables_for_null_columns(connector, tables: list, output_file: str) -> 
             logger.info(f"Processing table {i}/{len(tables)}: {table_name}")
 
             try:
-                # Get columns for this table
-                columns = get_table_columns(connector, table_name)
+                # Get columns for this table from pre-fetched metadata
+                columns = all_table_columns.get(table_name.upper(), [])
 
                 if not columns:
                     f.write(f"## {table_name}\n")
-                    f.write("ERROR: Could not retrieve columns\n\n")
+                    f.write("ERROR: Could not retrieve columns or table not found\n\n")
                     continue
 
                 # Check for null columns
@@ -137,8 +181,8 @@ def check_tables_for_null_columns(connector, tables: list, output_file: str) -> 
                 f.write(f"Total columns: {len(columns)}\n")
 
                 table_null_columns = []
-                for col, is_all_null in null_results.items():
-                    if is_all_null is True:
+                for col, result in null_results.items():
+                    if result.get('is_all_null') is True:
                         table_null_columns.append(col)
                         all_null_columns.append(f"{table_name}.{col}")
 
@@ -149,15 +193,40 @@ def check_tables_for_null_columns(connector, tables: list, output_file: str) -> 
                 else:
                     f.write("No columns with all NULL values found.\n")
 
+                # Show distinct value counts for all columns
+                f.write(f"\n**Column distinct value counts:**\n")
+                # Sort columns by distinct count for better readability
+                sorted_columns = sorted(
+                    null_results.items(), 
+                    key=lambda x: x[1].get('distinct_count', -1) if x[1].get('distinct_count') is not None else -1
+                )
+                
+                for col, result in sorted_columns:
+                    distinct_count = result.get('distinct_count')
+                    if distinct_count is not None:
+                        if distinct_count == 0:
+                            f.write(f"  - {col}: **0** (all NULL)\n")
+                        elif distinct_count == 1:
+                            f.write(f"  - {col}: **1** (single value)\n")
+                        else:
+                            f.write(f"  - {col}: {distinct_count}\n")
+                    else:
+                        f.write(f"  - {col}: *unknown* (check error)\n")
+
                 # Show any errors
-                error_columns = [col for col, result in null_results.items() if result is None]
+                error_columns = [col for col, result in null_results.items() if result.get('is_all_null') is None]
                 if error_columns:
-                    f.write(f"**Columns with check errors ({len(error_columns)}):**\n")
+                    f.write(f"\n**Columns with check errors ({len(error_columns)}):**\n")
                     for col in error_columns:
                         f.write(f"  - {col}\n")
 
                 f.write("\n")
-                logger.info(f"Completed {table_name}: {len(table_null_columns)} null columns found")
+                # Count columns by distinct value ranges for logging
+                distinct_counts = [result.get('distinct_count', 0) for result in null_results.values() if result.get('distinct_count') is not None]
+                zero_distinct = sum(1 for count in distinct_counts if count == 0)
+                one_distinct = sum(1 for count in distinct_counts if count == 1)
+                
+                logger.info(f"Completed {table_name}: {len(table_null_columns)} null columns, {one_distinct} single-value columns")
 
             except Exception as e:
                 logger.error(f"Error processing table {table_name}: {str(e)}")
