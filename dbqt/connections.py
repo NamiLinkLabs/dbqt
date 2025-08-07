@@ -239,6 +239,43 @@ class PostgreSQL(DBConnector):
         return conn_str
 
 
+class SQLServer(DBConnector):
+    @property
+    def connection_details(self):
+        # Build connection string for SQL Server / Azure Synapse
+        driver = self.config.get('driver', 'ODBC Driver 17 for SQL Server')
+        port = self.config.get('port', 1433)
+
+        conn_str = f"mssql+pyodbc://{self.config['user']}:{self.config['password']}@{self.config['server']}:{port}/{self.config['database']}?driver={driver}"
+
+        # Add optional connection parameters
+        if self.config.get('encrypt', True):
+            conn_str += "&Encrypt=yes"
+        if self.config.get('trust_server_certificate', False):
+            conn_str += "&TrustServerCertificate=yes"
+                
+        return conn_str
+
+    def fetch_table_metadata(self, table_name):
+        # Handle schema.table format
+        if '.' in table_name:
+            schema, table = table_name.split('.', 1)
+        else:
+            schema = self.config.get('schema', 'dbo')
+            table = table_name
+            
+        query = f"""
+        SELECT UPPER(COLUMN_NAME) AS COLUMN_NAME, DATA_TYPE
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE UPPER(TABLE_SCHEMA) = UPPER('{schema}') 
+        AND UPPER(TABLE_NAME) = UPPER('{table}')
+        ORDER BY ORDINAL_POSITION
+        """
+        self.logger.info(f"Fetching metadata for table: {schema}.{table}")
+        result = self.run_query(query)
+        return [(row[0], row[1]) for row in result]
+
+
 class Athena(DBConnector):
     def __init__(self, config):
         super().__init__(config)
@@ -334,6 +371,7 @@ def create_connector(config):
         'PostgreSQL': PostgreSQL,
         'DuckDB': DuckDB,
         'Athena': Athena,
+        'SQLServer': SQLServer,
     }
     connector_class = connector_map.get(config['type'])
     if not connector_class:

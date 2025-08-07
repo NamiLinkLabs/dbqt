@@ -1,0 +1,10 @@
+type: SQLServer  
+server: your-server-name 
+database: your-database  
+user: your-username      
+password: your-password  
+schema: dbo  # optional, defaults to dbo 
+port: 1433  # optional, defaults to 1433 
+encrypt: true  # optional, defaults to true
+trust_server_certificate: false  # optional, defaults to false   
+driver: "ODBC Driver 17 for SQL Server"  # optional  

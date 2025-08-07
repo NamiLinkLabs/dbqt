@@ -1,6 +1,6 @@
 [project]
 name = "dbqt"
-version = "0.1.9"
+version = "0.1.10"
 description = "DataBase Quality Tool"
 authors = [
     { name = "NamiLink" }
@@ -29,6 +29,7 @@ dependencies = [
     "boto3>=1.28.30",
     "pyarrow>=18.1.0",
     "tqdm>=4.67.1",
+    "pyodbc>=5.2.0",
 ]
 
 [project.urls]
