@@ -18,7 +18,7 @@ class DBConnector(ABC):
         self.config = config
         self.connection = None
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
-        self.conn_type = config.get('type', 'N/A')
+        self.conn_type = config.get("type", "N/A")
 
     # @abstractmethod
     def connection_details(self):
@@ -57,7 +57,9 @@ class DBConnector(ABC):
 
     def fetch_all_columns(self, table_name):
         try:
-            return {col[0].upper(): col[1] for col in self.fetch_table_metadata(table_name)}
+            return {
+                col[0].upper(): col[1] for col in self.fetch_table_metadata(table_name)
+            }
         except Exception as e:
             print(f"Error retrieving source table metadata: {str(e)}")
 
@@ -102,7 +104,11 @@ class MySQL(DBConnector):
 class Snowflake(DBConnector):
     @property
     def connection_details(self):
-        auth = "&authenticator=externalbrowser" if self.config.get('authenticator') == "externalbrowser" else ""
+        auth = (
+            "&authenticator=externalbrowser"
+            if self.config.get("authenticator") == "externalbrowser"
+            else ""
+        )
         conn_str = f"snowflake://{self.config['user']}:{self.config.get('password', 'dummy')}@{self.config['account']}/{self.config['database']}/{self.config['schema']}?warehouse={self.config['warehouse']}&role={self.config['role']}{auth}"
         return conn_str
 
@@ -124,7 +130,7 @@ class Snowflake(DBConnector):
 class DuckDB(DBConnector):
     def __init__(self, config):
         super().__init__(config)
-        self.duck_db_path = os.path.join(os.getcwd(), 'duckdb.db')
+        self.duck_db_path = os.path.join(os.getcwd(), "duckdb.db")
 
     @property
     def connection_details(self):
@@ -145,22 +151,21 @@ class DuckDB(DBConnector):
 class CSV(DuckDB):
     def connect(self):
         super().connect()
-        self.config['table'] = f"data{self.config.get('prefix', '')}"
+        self.config["table"] = f"data{self.config.get('prefix', '')}"
         self.logger.info(f"Creating table from CSV source: {self.config['file']}")
         self.generate_table_from_query(
-            self.config['table'],
-            f"SELECT * FROM read_csv_auto('{self.config['file']}')"
+            self.config["table"],
+            f"SELECT * FROM read_csv_auto('{self.config['file']}')",
         )
 
 
 class Parquet(DuckDB):
     def connect(self):
         super().connect()
-        self.config['table'] = f"data{self.config.get('prefix', '')}"
+        self.config["table"] = f"data{self.config.get('prefix', '')}"
         self.logger.info(f"Creating table from Parquet source: {self.config['file']}")
         self.generate_table_from_query(
-            self.config['table'],
-            f"SELECT * FROM read_parquet('{self.config['file']}')"
+            self.config["table"], f"SELECT * FROM read_parquet('{self.config['file']}')"
         )
 
 
@@ -168,64 +173,76 @@ class S3Parquet(Parquet):
     def __init__(self, config):
         super().__init__(config)
         self.session = boto3.Session(
-            profile_name=config.get('aws_profile', 'default'),
-            region_name=config.get('aws_region', 'us-west-2')
+            profile_name=config.get("aws_profile", "default"),
+            region_name=config.get("aws_region", "us-west-2"),
         )
-        self.s3_client = self.session.client('s3')
-        self.bucket = config['bucket']
-        self.key = config['key']
+        self.s3_client = self.session.client("s3")
+        self.bucket = config["bucket"]
+        self.key = config["key"]
 
-    def fetch_parquet_from_s3(self, bucket: str, key: str, local_path: str) -> Optional[str]:
+    def fetch_parquet_from_s3(
+        self, bucket: str, key: str, local_path: str
+    ) -> Optional[str]:
         try:
             s3_object = self.s3_client.head_object(Bucket=bucket, Key=key)
-            total_length = s3_object['ContentLength']
+            total_length = s3_object["ContentLength"]
 
-            with tqdm(total=round(total_length / (1024 * 1024), 2), unit='MB', desc=f"Fetching {key}") as pbar:
+            with tqdm(
+                total=round(total_length / (1024 * 1024), 2),
+                unit="MB",
+                desc=f"Fetching {key}",
+            ) as pbar:
                 self.s3_client.download_file(
                     bucket,
                     key,
                     local_path,
-                    Callback=lambda bytes_transferred: pbar.update(round(bytes_transferred / (1024 * 1024), 2))
+                    Callback=lambda bytes_transferred: pbar.update(
+                        round(bytes_transferred / (1024 * 1024), 2)
+                    ),
                 )
             return local_path
 
         except self.s3_client.exceptions.ClientError as e:
-            if e.response['Error']['Code'] == '404':
-                directory = '/'.join(key.split('/')[:-1]) + '/'
+            if e.response["Error"]["Code"] == "404":
+                directory = "/".join(key.split("/")[:-1]) + "/"
                 print(f"\nFile not found: s3://{bucket}/{key}")
                 print(f"Listing objects in directory: s3://{bucket}/{directory}\n")
 
-                paginator = self.s3_client.get_paginator('list_objects_v2')
+                paginator = self.s3_client.get_paginator("list_objects_v2")
                 objects = []
 
                 for page in paginator.paginate(Bucket=bucket, Prefix=directory):
-                    if 'Contents' in page:
-                        for obj in page['Contents']:
-                            if not obj['Key'].endswith('/'):
-                                objects.append(obj['Key'])
+                    if "Contents" in page:
+                        for obj in page["Contents"]:
+                            if not obj["Key"].endswith("/"):
+                                objects.append(obj["Key"])
 
                 if not objects:
                     print("No objects found in this directory.")
                     raise FileNotFoundError(f"File not found: s3://{bucket}/{key}")
 
-                reply = "Adjust path so only 1 file is in the path.\nAvailable objects:\n"
+                reply = (
+                    "Adjust path so only 1 file is in the path.\nAvailable objects:\n"
+                )
                 for i, obj in enumerate(objects, 1):
                     reply += f"{i}. {obj}\n"
 
                 while True:
                     if len(objects) == 1:
                         selected_key = objects[0]
-                        return self.fetch_parquet_from_s3(bucket, selected_key, local_path)
+                        return self.fetch_parquet_from_s3(
+                            bucket, selected_key, local_path
+                        )
                     else:
                         raise FileNotFoundError(reply)
             raise
 
     def connect(self):
-        local_path = os.path.join(os.getcwd(), '/tmp/temp.parquet')
+        local_path = os.path.join(os.getcwd(), "/tmp/temp.parquet")
         downloaded_path = self.fetch_parquet_from_s3(self.bucket, self.key, local_path)
 
         if downloaded_path:
-            self.config['file'] = downloaded_path
+            self.config["file"] = downloaded_path
             super().connect()
             os.remove(downloaded_path)
         else:
@@ -236,7 +253,9 @@ class PostgreSQL(DBConnector):
     @property
     def connection_details(self):
         conn_str = f"postgresql://{self.config['user']}:{self.config['password']}@{self.config['host']}:5432/{self.config['database']}"
-        self.logger.info(f"PostgreSQL connection details: {conn_str.replace(self.config['password'], '****')}")
+        self.logger.info(
+            f"PostgreSQL connection details: {conn_str.replace(self.config['password'], '****')}"
+        )
         return conn_str
 
 
@@ -244,12 +263,14 @@ class SQLServer(DBConnector):
     @property
     def connection_details(self):
         # Build connection string for SQL Server / Azure Synapse
-        driver = self.config.get('driver', 'ODBC Driver 17 for SQL Server')
+        driver = self.config.get("driver", "ODBC Driver 17 for SQL Server")
 
-        conn_string = (f"DRIVER={{{driver}}};"
-                       f"SERVER={self.config['server']};DATABASE={self.config['database']};"
-                       f"UID={self.config['user']};PWD={self.config['password']};"
-                       f"Authentication=ActiveDirectoryPassword")
+        conn_string = (
+            f"DRIVER={{{driver}}};"
+            f"SERVER={self.config['server']};DATABASE={self.config['database']};"
+            f"UID={self.config['user']};PWD={self.config['password']};"
+            f"Authentication=ActiveDirectoryPassword"
+        )
 
         return conn_string
 
@@ -269,12 +290,12 @@ class SQLServer(DBConnector):
 
     def fetch_table_metadata(self, table_name):
         # Handle schema.table format
-        if '.' in table_name:
-            schema, table = table_name.split('.', 1)
+        if "." in table_name:
+            schema, table = table_name.split(".", 1)
         else:
-            schema = self.config.get('schema', 'dbo')
+            schema = self.config.get("schema", "dbo")
             table = table_name
-            
+
         query = f"""
         SELECT UPPER(COLUMN_NAME) AS COLUMN_NAME, DATA_TYPE
         FROM INFORMATION_SCHEMA.COLUMNS
@@ -290,73 +311,69 @@ class SQLServer(DBConnector):
 class Athena(DBConnector):
     def __init__(self, config):
         super().__init__(config)
-        self.session = boto3.Session(
-            profile_name=config.get('aws_profile', 'default')
-        )
-        self.aws_region = config.get('aws_region', 'us-east-1')
-        self.workgroup = config.get('workgroup', 'primary')
-        self.athena_client = self.session.client('athena', region_name=self.aws_region)
+        self.session = boto3.Session(profile_name=config.get("aws_profile", "default"))
+        self.aws_region = config.get("aws_region", "us-east-1")
+        self.workgroup = config.get("workgroup", "primary")
+        self.athena_client = self.session.client("athena", region_name=self.aws_region)
 
     def connect(self):
         self.logger.info("Athena connection established")
-        
+
     def disconnect(self):
         self.logger.info("Athena connection terminated")
 
     def run_query(self, query):
         self.logger.info(f"Running Athena query: {query[:300]}")
-        
+
         # Build QueryExecutionContext
-        query_context = {
-            'Catalog': self.config.get('catalog', 'AwsDataCatalog')
-        }
-        
+        query_context = {"Catalog": self.config.get("catalog", "AwsDataCatalog")}
+
         # Only include Database if it's provided in config
-        if self.config.get('database'):
-            query_context['Database'] = self.config['database']
-        
+        if self.config.get("database"):
+            query_context["Database"] = self.config["database"]
+
         # Start query execution
         response = self.athena_client.start_query_execution(
             QueryString=query,
             QueryExecutionContext=query_context,
-            WorkGroup=self.workgroup
+            WorkGroup=self.workgroup,
         )
-        
-        query_execution_id = response['QueryExecutionId']
-        
+
+        query_execution_id = response["QueryExecutionId"]
+
         # Wait for query to complete with exponential backoff
         wait_time = 1  # Start with 1 second
         while True:
             query_status = self.athena_client.get_query_execution(
                 QueryExecutionId=query_execution_id
-            )['QueryExecution']['Status']
-            
-            state = query_status['State']
-            
-            if state in ['SUCCEEDED', 'FAILED', 'CANCELLED']:
-                if state == 'FAILED':
-                    reason = query_status.get('StateChangeReason', 'Unknown error')
+            )["QueryExecution"]["Status"]
+
+            state = query_status["State"]
+
+            if state in ["SUCCEEDED", "FAILED", "CANCELLED"]:
+                if state == "FAILED":
+                    reason = query_status.get("StateChangeReason", "Unknown error")
                     raise Exception(f"Query failed: {reason}")
-                elif state == 'CANCELLED':
+                elif state == "CANCELLED":
                     raise Exception("Query was cancelled")
                 break
-            
+
             # Exponential backoff with max of 10 seconds
             time.sleep(wait_time)
             wait_time = min(10, wait_time * 5)  # 1s -> 5s -> 10s -> 10s -> ...
-            
+
         # Get query results
         results = []
-        paginator = self.athena_client.get_paginator('get_query_results')
-        
+        paginator = self.athena_client.get_paginator("get_query_results")
+
         try:
             for page in paginator.paginate(QueryExecutionId=query_execution_id):
-                for row in page['ResultSet']['Rows']:
-                    results.append([field.get('VarCharValue') for field in row['Data']])
+                for row in page["ResultSet"]["Rows"]:
+                    results.append([field.get("VarCharValue") for field in row["Data"]])
         except Exception as e:
             self.logger.error(f"Error fetching results: {str(e)}")
             raise
-            
+
         return results
 
     def count_rows(self, table_name, where_clause=None):
@@ -374,17 +391,17 @@ class Athena(DBConnector):
 
 def create_connector(config):
     connector_map = {
-        'MySQL': MySQL,
-        'Snowflake': Snowflake,
-        'CSV': CSV,
-        'Parquet': Parquet,
-        'S3Parquet': S3Parquet,
-        'PostgreSQL': PostgreSQL,
-        'DuckDB': DuckDB,
-        'Athena': Athena,
-        'SQLServer': SQLServer,
+        "MySQL": MySQL,
+        "Snowflake": Snowflake,
+        "CSV": CSV,
+        "Parquet": Parquet,
+        "S3Parquet": S3Parquet,
+        "PostgreSQL": PostgreSQL,
+        "DuckDB": DuckDB,
+        "Athena": Athena,
+        "SQLServer": SQLServer,
     }
-    connector_class = connector_map.get(config['type'])
+    connector_class = connector_map.get(config["type"])
     if not connector_class:
         logger.error(f"Unsupported connector type: {config['type']}")
         raise ValueError(f"Unsupported connector type: {config['type']}")

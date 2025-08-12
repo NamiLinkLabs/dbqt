@@ -67,4 +67,5 @@ dev = [
     "build",
     "twine",
     "check-manifest>=0.50",
+    "pre-commit>=4.3.0",
 ]
