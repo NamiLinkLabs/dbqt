@@ -2,6 +2,7 @@ import yaml
 import polars as pl
 import logging
 import threading
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dbqt.connections import create_connector
 
@@ -10,6 +11,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - [%(threadName)s] - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
 
 def get_row_count_for_table(connector, table_name):
     """Get row count for a single table using a shared connector."""
@@ -92,14 +94,15 @@ Example config.yaml:
     tables_file: tables.csv
         """
     )
-    parser.add_argument('config_file', help='YAML config file containing database connection and tables list')
-    
+    parser.add_argument('--config', required=True, help='YAML config file containing database connection and tables list')
+
     if args is None:
         args = parser.parse_args()
     else:
         args = parser.parse_args(args)
-    
-    get_table_stats(args.config_file)
+
+    get_table_stats(args.config)
+
 
 if __name__ == "__main__":
     main()

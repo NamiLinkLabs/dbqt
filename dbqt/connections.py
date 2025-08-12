@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 import os
 import logging
 from typing import Optional
+import pyodbc
 
 import boto3
 import time
@@ -244,17 +245,27 @@ class SQLServer(DBConnector):
     def connection_details(self):
         # Build connection string for SQL Server / Azure Synapse
         driver = self.config.get('driver', 'ODBC Driver 17 for SQL Server')
-        port = self.config.get('port', 1433)
 
-        conn_str = f"mssql+pyodbc://{self.config['user']}:{self.config['password']}@{self.config['server']}:{port}/{self.config['database']}?driver={driver}"
+        conn_string = (f"DRIVER={{{driver}}};"
+                       f"SERVER={self.config['server']};DATABASE={self.config['database']};"
+                       f"UID={self.config['user']};PWD={self.config['password']};"
+                       f"Authentication=ActiveDirectoryPassword")
 
-        # Add optional connection parameters
-        if self.config.get('encrypt', True):
-            conn_str += "&Encrypt=yes"
-        if self.config.get('trust_server_certificate', False):
-            conn_str += "&TrustServerCertificate=yes"
-                
-        return conn_str
+        return conn_string
+
+    def connect(self):
+        self.logger.info(f"Establishing connection to {self.conn_type}")
+        self.connection = pyodbc.connect(self.connection_details)
+
+        self.logger.info(f"Connection established to {self.conn_type}")
+
+    def run_query(self, query):
+        self.logger.info(f"Running {self.conn_type} query: {query[:300]}")
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+        result = cursor.fetchall()
+        self.logger.info("Query completed successfully")
+        return result if result else "Success"
 
     def fetch_table_metadata(self, table_name):
         # Handle schema.table format
@@ -379,4 +390,3 @@ def create_connector(config):
         raise ValueError(f"Unsupported connector type: {config['type']}")
     logger.info(f"Initializing connector for type: {config['type']}")
     return connector_class(config)
-
