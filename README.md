@@ -51,9 +51,9 @@ dbqt combine [output.parquet]  # Combines all .parquet files in current director
 
 ### Database Statistics Tool (dbqt dbstats)
 Collect and analyze database statistics:
-- Table row counts
-- Updates statistics in CSV format
-- Configurable through YAML
+- Fetches table row counts in parallel for faster execution.
+- Updates statistics in a CSV file.
+- Configurable through YAML.
 
 Usage:
 ```bash
@@ -90,6 +90,42 @@ tables_file: tables.csv
 ```
 
 The tables.csv file should contain at minimum a `table_name` column. The tool will add/update a `row_count` column with the results.
+
+### Null Column Check Tool (dbqt nullcheck)
+Check for columns where all records are null across multiple tables in Snowflake.
+- Identifies completely empty columns.
+- Reports on columns with low-distinct values (<=5).
+- Efficiently checks multiple tables in parallel.
+- Generates a markdown report summarizing the findings.
+
+Usage:
+```bash
+dbqt nullcheck --config snowflake_config.yaml
+```
+This tool currently only supports Snowflake.
+
+### Dynamic Query Tool (dbqt dynamic-query)
+Run a dynamic SQL query against Athena for a list of values from a CSV file.
+- Substitutes values from a CSV into a query template.
+- Executes queries sequentially and writes results to an output file.
+- Useful for running the same query against multiple tables or with different parameters.
+
+Usage:
+```bash
+dbqt dynamic-query --config athena_config.yaml --csv values.csv --query "SELECT COUNT(1) FROM {var_from_csv}"
+```
+This tool currently only supports AWS Athena.
+
+### Parquetizer Tool (dbqt parquetizer)
+A utility to recursively find files that are Parquet but lack the `.parquet` extension and rename them.
+- Scans a directory for files without extensions.
+- Validates if a file is a Parquet file by checking its magic bytes.
+- Renames valid Parquet files to include the `.parquet` extension.
+
+Usage:
+```bash
+dbqt parquetizer [directory] # Scans from the specified directory (or current if not provided)
+```
 
 ## 🚀 Future Plans
 

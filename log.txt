@@ -1,0 +1,2134 @@
+diff --git a/.pre-commit-config.yaml b/.pre-commit-config.yaml
+new file mode 100644
+index 0000000..9eeb208
+--- /dev/null
++++ b/.pre-commit-config.yaml
+@@ -0,0 +1,11 @@
++repos:
++  # Using this mirror lets us use mypyc-compiled black, which is about 2x faster
++  - repo: https://github.com/psf/black-pre-commit-mirror
++    rev: 25.1.0
++    hooks:
++      - id: black
++        # It is recommended to specify the latest version of Python
++        # supported by your project here, or alternatively use
++        # pre-commit's default_language_version, see
++        # https://pre-commit.com/#top_level-default_language_version
++        language_version: python3.12
+diff --git a/dbqt/app.py b/dbqt/app.py
+index 011f0e7..640f58f 100644
+--- a/dbqt/app.py
++++ b/dbqt/app.py
+@@ -6,18 +6,18 @@ from pathlib import Path
+ 
+ def discover_tools():
+     """Discover available tools by scanning the tools directory."""
+-    tools_dir = Path(__file__).parent / 'tools'
++    tools_dir = Path(__file__).parent / "tools"
+     tools = {}
+-    
+-    for file_path in tools_dir.glob('*.py'):
+-        if file_path.name.startswith('__'):
++
++    for file_path in tools_dir.glob("*.py"):
++        if file_path.name.startswith("__"):
+             continue
+-            
++
+         tool_name = file_path.stem
+         # Convert underscores to hyphens for command names
+-        command_name = tool_name.replace('_', '-')
++        command_name = tool_name.replace("_", "-")
+         tools[command_name] = tool_name
+-        
++
+     return tools
+ 
+ 
+@@ -25,6 +25,7 @@ def get_tool_aliases():
+     """Get tool aliases from tools.__init__.py if available."""
+     try:
+         from dbqt.tools import TOOL_ALIASES
++
+         return TOOL_ALIASES
+     except ImportError:
+         return {}
+@@ -34,12 +35,12 @@ def get_available_commands():
+     """Get all available commands including aliases."""
+     tools = discover_tools()
+     aliases = get_tool_aliases()
+-    
++
+     # Combine tools and aliases
+     all_commands = {}
+     all_commands.update(tools)
+     all_commands.update(aliases)
+-    
++
+     return all_commands, tools, aliases
+ 
+ 
+@@ -50,70 +51,71 @@ def generate_help_text(tools, aliases):
+         "",
+         "Usage: dbqt <command> [args...]",
+         "",
+-        "Commands:"
++        "Commands:",
+     ]
+-    
++
+     # Create reverse mapping of tool to aliases
+     tool_to_aliases = {}
+     for alias, tool in aliases.items():
+         if tool not in tool_to_aliases:
+             tool_to_aliases[tool] = []
+         tool_to_aliases[tool].append(alias)
+-    
++
+     # Add main tools with their aliases
+     for command, tool in sorted(tools.items()):
+         command_list = [command]
+         if tool in tool_to_aliases:
+             command_list.extend(sorted(tool_to_aliases[tool]))
+-        
++
+         commands_str = ", ".join(command_list)
+         help_lines.append(f"  {commands_str:<20} Tool: {tool}")
+-    
+-    help_lines.extend([
+-        "",
+-        "Run 'dbqt <command> --help' for detailed help on each command."
+-    ])
+-    
++
++    help_lines.extend(
++        ["", "Run 'dbqt <command> --help' for detailed help on each command."]
++    )
++
+     return "\n".join(help_lines)
+ 
+ 
+ def main():
+-    if len(sys.argv) < 2 or sys.argv[1] in ['-h', '--help']:
++    if len(sys.argv) < 2 or sys.argv[1] in ["-h", "--help"]:
+         all_commands, tools, aliases = get_available_commands()
+         print(generate_help_text(tools, aliases))
+         sys.exit(1)
+ 
+     command = sys.argv[1]
+     args = sys.argv[2:]
+-    
++
+     all_commands, tools, aliases = get_available_commands()
+-    
++
+     if command not in all_commands:
+         print(f"Unknown command: {command}")
+         print(f"Available commands: {', '.join(sorted(all_commands.keys()))}")
+         sys.exit(1)
+-    
++
+     # Get the actual tool name (resolve aliases)
+     tool_name = all_commands[command]
+-    
++
+     try:
+         # Import the tool module
+-        module = importlib.import_module(f'dbqt.tools.{tool_name}')
+-        
++        module = importlib.import_module(f"dbqt.tools.{tool_name}")
++
+         # Determine the entry point function
+-        if hasattr(module, 'main'):
++        if hasattr(module, "main"):
+             entry_point = module.main
+-        elif tool_name == 'colcompare' and hasattr(module, 'colcompare'):
++        elif tool_name == "colcompare" and hasattr(module, "colcompare"):
+             entry_point = module.colcompare
+         else:
+-            print(f"Error: Tool '{tool_name}' does not have a main() or {tool_name}() function")
++            print(
++                f"Error: Tool '{tool_name}' does not have a main() or {tool_name}() function"
++            )
+             sys.exit(1)
+-        
++
+         # Run the tool
+         result = entry_point(args)
+         if result is not None:
+             sys.exit(result)
+-            
++
+     except ImportError as e:
+         print(f"Error importing tool '{tool_name}': {e}")
+         sys.exit(1)
+diff --git a/dbqt/connections.py b/dbqt/connections.py
+index 63e8a44..6e5a1e4 100644
+--- a/dbqt/connections.py
++++ b/dbqt/connections.py
+@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
+ import os
+ import logging
+ from typing import Optional
++import pyodbc
+ 
+ import boto3
+ import time
+@@ -17,7 +18,7 @@ class DBConnector(ABC):
+         self.config = config
+         self.connection = None
+         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+-        self.conn_type = config.get('type', 'N/A')
++        self.conn_type = config.get("type", "N/A")
+ 
+     # @abstractmethod
+     def connection_details(self):
+@@ -56,7 +57,9 @@ class DBConnector(ABC):
+ 
+     def fetch_all_columns(self, table_name):
+         try:
+-            return {col[0].upper(): col[1] for col in self.fetch_table_metadata(table_name)}
++            return {
++                col[0].upper(): col[1] for col in self.fetch_table_metadata(table_name)
++            }
+         except Exception as e:
+             print(f"Error retrieving source table metadata: {str(e)}")
+ 
+@@ -101,7 +104,11 @@ class MySQL(DBConnector):
+ class Snowflake(DBConnector):
+     @property
+     def connection_details(self):
+-        auth = "&authenticator=externalbrowser" if self.config.get('authenticator') == "externalbrowser" else ""
++        auth = (
++            "&authenticator=externalbrowser"
++            if self.config.get("authenticator") == "externalbrowser"
++            else ""
++        )
+         conn_str = f"snowflake://{self.config['user']}:{self.config.get('password', 'dummy')}@{self.config['account']}/{self.config['database']}/{self.config['schema']}?warehouse={self.config['warehouse']}&role={self.config['role']}{auth}"
+         return conn_str
+ 
+@@ -123,7 +130,7 @@ class Snowflake(DBConnector):
+ class DuckDB(DBConnector):
+     def __init__(self, config):
+         super().__init__(config)
+-        self.duck_db_path = os.path.join(os.getcwd(), 'duckdb.db')
++        self.duck_db_path = os.path.join(os.getcwd(), "duckdb.db")
+ 
+     @property
+     def connection_details(self):
+@@ -144,22 +151,21 @@ class DuckDB(DBConnector):
+ class CSV(DuckDB):
+     def connect(self):
+         super().connect()
+-        self.config['table'] = f"data{self.config.get('prefix', '')}"
++        self.config["table"] = f"data{self.config.get('prefix', '')}"
+         self.logger.info(f"Creating table from CSV source: {self.config['file']}")
+         self.generate_table_from_query(
+-            self.config['table'],
+-            f"SELECT * FROM read_csv_auto('{self.config['file']}')"
++            self.config["table"],
++            f"SELECT * FROM read_csv_auto('{self.config['file']}')",
+         )
+ 
+ 
+ class Parquet(DuckDB):
+     def connect(self):
+         super().connect()
+-        self.config['table'] = f"data{self.config.get('prefix', '')}"
++        self.config["table"] = f"data{self.config.get('prefix', '')}"
+         self.logger.info(f"Creating table from Parquet source: {self.config['file']}")
+         self.generate_table_from_query(
+-            self.config['table'],
+-            f"SELECT * FROM read_parquet('{self.config['file']}')"
++            self.config["table"], f"SELECT * FROM read_parquet('{self.config['file']}')"
+         )
+ 
+ 
+@@ -167,64 +173,76 @@ class S3Parquet(Parquet):
+     def __init__(self, config):
+         super().__init__(config)
+         self.session = boto3.Session(
+-            profile_name=config.get('aws_profile', 'default'),
+-            region_name=config.get('aws_region', 'us-west-2')
++            profile_name=config.get("aws_profile", "default"),
++            region_name=config.get("aws_region", "us-west-2"),
+         )
+-        self.s3_client = self.session.client('s3')
+-        self.bucket = config['bucket']
+-        self.key = config['key']
++        self.s3_client = self.session.client("s3")
++        self.bucket = config["bucket"]
++        self.key = config["key"]
+ 
+-    def fetch_parquet_from_s3(self, bucket: str, key: str, local_path: str) -> Optional[str]:
++    def fetch_parquet_from_s3(
++        self, bucket: str, key: str, local_path: str
++    ) -> Optional[str]:
+         try:
+             s3_object = self.s3_client.head_object(Bucket=bucket, Key=key)
+-            total_length = s3_object['ContentLength']
++            total_length = s3_object["ContentLength"]
+ 
+-            with tqdm(total=round(total_length / (1024 * 1024), 2), unit='MB', desc=f"Fetching {key}") as pbar:
++            with tqdm(
++                total=round(total_length / (1024 * 1024), 2),
++                unit="MB",
++                desc=f"Fetching {key}",
++            ) as pbar:
+                 self.s3_client.download_file(
+                     bucket,
+                     key,
+                     local_path,
+-                    Callback=lambda bytes_transferred: pbar.update(round(bytes_transferred / (1024 * 1024), 2))
++                    Callback=lambda bytes_transferred: pbar.update(
++                        round(bytes_transferred / (1024 * 1024), 2)
++                    ),
+                 )
+             return local_path
+ 
+         except self.s3_client.exceptions.ClientError as e:
+-            if e.response['Error']['Code'] == '404':
+-                directory = '/'.join(key.split('/')[:-1]) + '/'
++            if e.response["Error"]["Code"] == "404":
++                directory = "/".join(key.split("/")[:-1]) + "/"
+                 print(f"\nFile not found: s3://{bucket}/{key}")
+                 print(f"Listing objects in directory: s3://{bucket}/{directory}\n")
+ 
+-                paginator = self.s3_client.get_paginator('list_objects_v2')
++                paginator = self.s3_client.get_paginator("list_objects_v2")
+                 objects = []
+ 
+                 for page in paginator.paginate(Bucket=bucket, Prefix=directory):
+-                    if 'Contents' in page:
+-                        for obj in page['Contents']:
+-                            if not obj['Key'].endswith('/'):
+-                                objects.append(obj['Key'])
++                    if "Contents" in page:
++                        for obj in page["Contents"]:
++                            if not obj["Key"].endswith("/"):
++                                objects.append(obj["Key"])
+ 
+                 if not objects:
+                     print("No objects found in this directory.")
+                     raise FileNotFoundError(f"File not found: s3://{bucket}/{key}")
+ 
+-                reply = "Adjust path so only 1 file is in the path.\nAvailable objects:\n"
++                reply = (
++                    "Adjust path so only 1 file is in the path.\nAvailable objects:\n"
++                )
+                 for i, obj in enumerate(objects, 1):
+                     reply += f"{i}. {obj}\n"
+ 
+                 while True:
+                     if len(objects) == 1:
+                         selected_key = objects[0]
+-                        return self.fetch_parquet_from_s3(bucket, selected_key, local_path)
++                        return self.fetch_parquet_from_s3(
++                            bucket, selected_key, local_path
++                        )
+                     else:
+                         raise FileNotFoundError(reply)
+             raise
+ 
+     def connect(self):
+-        local_path = os.path.join(os.getcwd(), '/tmp/temp.parquet')
++        local_path = os.path.join(os.getcwd(), "/tmp/temp.parquet")
+         downloaded_path = self.fetch_parquet_from_s3(self.bucket, self.key, local_path)
+ 
+         if downloaded_path:
+-            self.config['file'] = downloaded_path
++            self.config["file"] = downloaded_path
+             super().connect()
+             os.remove(downloaded_path)
+         else:
+@@ -235,7 +253,9 @@ class PostgreSQL(DBConnector):
+     @property
+     def connection_details(self):
+         conn_str = f"postgresql://{self.config['user']}:{self.config['password']}@{self.config['host']}:5432/{self.config['database']}"
+-        self.logger.info(f"PostgreSQL connection details: {conn_str.replace(self.config['password'], '****')}")
++        self.logger.info(
++            f"PostgreSQL connection details: {conn_str.replace(self.config['password'], '****')}"
++        )
+         return conn_str
+ 
+ 
+@@ -243,27 +263,39 @@ class SQLServer(DBConnector):
+     @property
+     def connection_details(self):
+         # Build connection string for SQL Server / Azure Synapse
+-        driver = self.config.get('driver', 'ODBC Driver 17 for SQL Server')
+-        port = self.config.get('port', 1433)
++        driver = self.config.get("driver", "ODBC Driver 17 for SQL Server")
++
++        conn_string = (
++            f"DRIVER={{{driver}}};"
++            f"SERVER={self.config['server']};DATABASE={self.config['database']};"
++            f"UID={self.config['user']};PWD={self.config['password']};"
++            f"Authentication=ActiveDirectoryPassword"
++        )
+ 
+-        conn_str = f"mssql+pyodbc://{self.config['user']}:{self.config['password']}@{self.config['server']}:{port}/{self.config['database']}?driver={driver}"
++        return conn_string
+ 
+-        # Add optional connection parameters
+-        if self.config.get('encrypt', True):
+-            conn_str += "&Encrypt=yes"
+-        if self.config.get('trust_server_certificate', False):
+-            conn_str += "&TrustServerCertificate=yes"
+-                
+-        return conn_str
++    def connect(self):
++        self.logger.info(f"Establishing connection to {self.conn_type}")
++        self.connection = pyodbc.connect(self.connection_details)
++
++        self.logger.info(f"Connection established to {self.conn_type}")
++
++    def run_query(self, query):
++        self.logger.info(f"Running {self.conn_type} query: {query[:300]}")
++        cursor = self.connection.cursor()
++        cursor.execute(query)
++        result = cursor.fetchall()
++        self.logger.info("Query completed successfully")
++        return result if result else "Success"
+ 
+     def fetch_table_metadata(self, table_name):
+         # Handle schema.table format
+-        if '.' in table_name:
+-            schema, table = table_name.split('.', 1)
++        if "." in table_name:
++            schema, table = table_name.split(".", 1)
+         else:
+-            schema = self.config.get('schema', 'dbo')
++            schema = self.config.get("schema", "dbo")
+             table = table_name
+-            
++
+         query = f"""
+         SELECT UPPER(COLUMN_NAME) AS COLUMN_NAME, DATA_TYPE
+         FROM INFORMATION_SCHEMA.COLUMNS
+@@ -279,73 +311,69 @@ class SQLServer(DBConnector):
+ class Athena(DBConnector):
+     def __init__(self, config):
+         super().__init__(config)
+-        self.session = boto3.Session(
+-            profile_name=config.get('aws_profile', 'default')
+-        )
+-        self.aws_region = config.get('aws_region', 'us-east-1')
+-        self.workgroup = config.get('workgroup', 'primary')
+-        self.athena_client = self.session.client('athena', region_name=self.aws_region)
++        self.session = boto3.Session(profile_name=config.get("aws_profile", "default"))
++        self.aws_region = config.get("aws_region", "us-east-1")
++        self.workgroup = config.get("workgroup", "primary")
++        self.athena_client = self.session.client("athena", region_name=self.aws_region)
+ 
+     def connect(self):
+         self.logger.info("Athena connection established")
+-        
++
+     def disconnect(self):
+         self.logger.info("Athena connection terminated")
+ 
+     def run_query(self, query):
+         self.logger.info(f"Running Athena query: {query[:300]}")
+-        
++
+         # Build QueryExecutionContext
+-        query_context = {
+-            'Catalog': self.config.get('catalog', 'AwsDataCatalog')
+-        }
+-        
++        query_context = {"Catalog": self.config.get("catalog", "AwsDataCatalog")}
++
+         # Only include Database if it's provided in config
+-        if self.config.get('database'):
+-            query_context['Database'] = self.config['database']
+-        
++        if self.config.get("database"):
++            query_context["Database"] = self.config["database"]
++
+         # Start query execution
+         response = self.athena_client.start_query_execution(
+             QueryString=query,
+             QueryExecutionContext=query_context,
+-            WorkGroup=self.workgroup
++            WorkGroup=self.workgroup,
+         )
+-        
+-        query_execution_id = response['QueryExecutionId']
+-        
++
++        query_execution_id = response["QueryExecutionId"]
++
+         # Wait for query to complete with exponential backoff
+         wait_time = 1  # Start with 1 second
+         while True:
+             query_status = self.athena_client.get_query_execution(
+                 QueryExecutionId=query_execution_id
+-            )['QueryExecution']['Status']
+-            
+-            state = query_status['State']
+-            
+-            if state in ['SUCCEEDED', 'FAILED', 'CANCELLED']:
+-                if state == 'FAILED':
+-                    reason = query_status.get('StateChangeReason', 'Unknown error')
++            )["QueryExecution"]["Status"]
++
++            state = query_status["State"]
++
++            if state in ["SUCCEEDED", "FAILED", "CANCELLED"]:
++                if state == "FAILED":
++                    reason = query_status.get("StateChangeReason", "Unknown error")
+                     raise Exception(f"Query failed: {reason}")
+-                elif state == 'CANCELLED':
++                elif state == "CANCELLED":
+                     raise Exception("Query was cancelled")
+                 break
+-            
++
+             # Exponential backoff with max of 10 seconds
+             time.sleep(wait_time)
+             wait_time = min(10, wait_time * 5)  # 1s -> 5s -> 10s -> 10s -> ...
+-            
++
+         # Get query results
+         results = []
+-        paginator = self.athena_client.get_paginator('get_query_results')
+-        
++        paginator = self.athena_client.get_paginator("get_query_results")
++
+         try:
+             for page in paginator.paginate(QueryExecutionId=query_execution_id):
+-                for row in page['ResultSet']['Rows']:
+-                    results.append([field.get('VarCharValue') for field in row['Data']])
++                for row in page["ResultSet"]["Rows"]:
++                    results.append([field.get("VarCharValue") for field in row["Data"]])
+         except Exception as e:
+             self.logger.error(f"Error fetching results: {str(e)}")
+             raise
+-            
++
+         return results
+ 
+     def count_rows(self, table_name, where_clause=None):
+@@ -363,20 +391,19 @@ class Athena(DBConnector):
+ 
+ def create_connector(config):
+     connector_map = {
+-        'MySQL': MySQL,
+-        'Snowflake': Snowflake,
+-        'CSV': CSV,
+-        'Parquet': Parquet,
+-        'S3Parquet': S3Parquet,
+-        'PostgreSQL': PostgreSQL,
+-        'DuckDB': DuckDB,
+-        'Athena': Athena,
+-        'SQLServer': SQLServer,
++        "MySQL": MySQL,
++        "Snowflake": Snowflake,
++        "CSV": CSV,
++        "Parquet": Parquet,
++        "S3Parquet": S3Parquet,
++        "PostgreSQL": PostgreSQL,
++        "DuckDB": DuckDB,
++        "Athena": Athena,
++        "SQLServer": SQLServer,
+     }
+-    connector_class = connector_map.get(config['type'])
++    connector_class = connector_map.get(config["type"])
+     if not connector_class:
+         logger.error(f"Unsupported connector type: {config['type']}")
+         raise ValueError(f"Unsupported connector type: {config['type']}")
+     logger.info(f"Initializing connector for type: {config['type']}")
+     return connector_class(config)
+-
+diff --git a/dbqt/tools/__init__.py b/dbqt/tools/__init__.py
+index f19ee2b..e18359d 100644
+--- a/dbqt/tools/__init__.py
++++ b/dbqt/tools/__init__.py
+@@ -4,6 +4,6 @@ Maps command aliases to their actual tool module names.
+ """
+ 
+ TOOL_ALIASES = {
+-    'compare': 'colcompare',
+-    'rowcount': 'dbstats',
++    "compare": "colcompare",
++    "rowcount": "dbstats",
+ }
+diff --git a/dbqt/tools/colcompare.py b/dbqt/tools/colcompare.py
+index 573c330..beabcc1 100644
+--- a/dbqt/tools/colcompare.py
++++ b/dbqt/tools/colcompare.py
+@@ -8,40 +8,44 @@ from openpyxl.styles import PatternFill, Font, Alignment
+ from openpyxl.utils import get_column_letter
+ import os
+ from datetime import datetime
++from dbqt.tools.utils import Timer, setup_logging
++import logging
++
++logger = logging.getLogger(__name__)
+ 
+ # Define type mappings for equivalent data types
+ TYPE_MAPPINGS = {
+-    'INTEGER': ['INT', 'INTEGER', 'BIGINT', 'SMALLINT', 'TINYINT','NUMBER'],
+-    'VARCHAR': ['VARCHAR', 'TEXT', 'CHAR', 'STRING', 'NVARCHAR'],
+-    'DECIMAL': ['DECIMAL', 'NUMERIC', 'NUMBER'],
+-    'FLOAT': ['FLOAT', 'REAL', 'DOUBLE', 'DOUBLE PRECISION'],
+-    'TIMESTAMP': ['TIMESTAMP','DATETIME'],
+-    'DATE': ['DATE'],
+-    'BOOLEAN': ['BOOLEAN', 'BOOL', 'BIT']
++    "INTEGER": ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "NUMBER"],
++    "VARCHAR": ["VARCHAR", "TEXT", "CHAR", "STRING", "NVARCHAR"],
++    "DECIMAL": ["DECIMAL", "NUMERIC", "NUMBER"],
++    "FLOAT": ["FLOAT", "REAL", "DOUBLE", "DOUBLE PRECISION"],
++    "TIMESTAMP": ["TIMESTAMP", "DATETIME"],
++    "DATE": ["DATE"],
++    "BOOLEAN": ["BOOLEAN", "BOOL", "BIT"],
+ }
+ 
+ 
+ def are_types_compatible(type1, type2):
+     """Check if two data types are considered compatible"""
+     type1, type2 = type1.upper(), type2.upper()
+-    
++
+     # Strip length specifications like VARCHAR(50) to VARCHAR
+-    type1 = type1.split('(')[0].strip()
+-    type2 = type2.split('(')[0].strip()
+-    
++    type1 = type1.split("(")[0].strip()
++    type2 = type2.split("(")[0].strip()
++
+     # If types are exactly the same, they're compatible
+     if type1 == type2:
+         return True
+-    
++
+     # Special handling for TIMESTAMP variations
+-    if re.match(r'^TIMESTAMP.*', type1) and re.match(r'^TIMESTAMP.*', type2):
++    if re.match(r"^TIMESTAMP.*", type1) and re.match(r"^TIMESTAMP.*", type2):
+         return True
+-    
++
+     # Check if types belong to the same group
+     for type_group in TYPE_MAPPINGS.values():
+         if type1 in type_group and type2 in type_group:
+             return True
+-    
++
+     return False
+ 
+ 
+@@ -49,44 +53,60 @@ def _process_nested_type(field_type, parent_name="", processed_fields=None):
+     """Recursively process nested types in Parquet schema"""
+     if processed_fields is None:
+         processed_fields = []
+-    
++
+     # Handle list types
+     if isinstance(field_type, (pyarrow.lib.ListType, pyarrow.lib.LargeListType)):
+         element_type = field_type.value_type
+         if isinstance(element_type, pyarrow.lib.StructType):
+             for nested_field in element_type:
+-                full_name = f"{parent_name}__{nested_field.name}" if parent_name else nested_field.name
+-                if isinstance(nested_field.type, (pyarrow.lib.ListType, pyarrow.lib.LargeListType, pyarrow.lib.StructType, pyarrow.lib.MapType)):
++                full_name = (
++                    f"{parent_name}__{nested_field.name}"
++                    if parent_name
++                    else nested_field.name
++                )
++                if isinstance(
++                    nested_field.type,
++                    (
++                        pyarrow.lib.ListType,
++                        pyarrow.lib.LargeListType,
++                        pyarrow.lib.StructType,
++                        pyarrow.lib.MapType,
++                    ),
++                ):
+                     _process_nested_type(nested_field.type, full_name, processed_fields)
+                 else:
+-                    processed_fields.append({
+-                        'col_name': full_name,
+-                        'type': str(nested_field.type)
+-                    })
++                    processed_fields.append(
++                        {"col_name": full_name, "type": str(nested_field.type)}
++                    )
+         else:
+-            processed_fields.append({
+-                'col_name': parent_name,
+-                'type': str(field_type)
+-            })
++            processed_fields.append({"col_name": parent_name, "type": str(field_type)})
+ 
+     # Handle struct types
+     elif isinstance(field_type, pyarrow.lib.StructType):
+         for nested_field in field_type:
+-            full_name = f"{parent_name}__{nested_field.name}" if parent_name else nested_field.name
+-            if isinstance(nested_field.type, (pyarrow.lib.ListType, pyarrow.lib.LargeListType, pyarrow.lib.StructType, pyarrow.lib.MapType)):
++            full_name = (
++                f"{parent_name}__{nested_field.name}"
++                if parent_name
++                else nested_field.name
++            )
++            if isinstance(
++                nested_field.type,
++                (
++                    pyarrow.lib.ListType,
++                    pyarrow.lib.LargeListType,
++                    pyarrow.lib.StructType,
++                    pyarrow.lib.MapType,
++                ),
++            ):
+                 _process_nested_type(nested_field.type, full_name, processed_fields)
+             else:
+-                processed_fields.append({
+-                    'col_name': full_name,
+-                    'type': str(nested_field.type)
+-                })
++                processed_fields.append(
++                    {"col_name": full_name, "type": str(nested_field.type)}
++                )
+ 
+     # Handle map types
+     elif isinstance(field_type, pyarrow.lib.MapType):
+-        processed_fields.append({
+-            'col_name': parent_name,
+-            'type': str(field_type)
+-        })
++        processed_fields.append({"col_name": parent_name, "type": str(field_type)})
+ 
+     return processed_fields
+ 
+@@ -101,35 +121,49 @@ def compare_and_unnest_parquet_schema(source_path, target_path):
+     processed_fields2 = []
+ 
+     for field in schema1:
+-        if isinstance(field.type, (pyarrow.lib.ListType, pyarrow.lib.LargeListType, pyarrow.lib.StructType, pyarrow.lib.MapType)):
++        if isinstance(
++            field.type,
++            (
++                pyarrow.lib.ListType,
++                pyarrow.lib.LargeListType,
++                pyarrow.lib.StructType,
++                pyarrow.lib.MapType,
++            ),
++        ):
+             processed_fields1.extend(_process_nested_type(field.type, field.name))
+         else:
+-            processed_fields1.append({
+-                'col_name': field.name,
+-                'type': str(field.type)
+-            })
++            processed_fields1.append({"col_name": field.name, "type": str(field.type)})
+ 
+     for field in schema2:
+-        if isinstance(field.type, (pyarrow.lib.ListType, pyarrow.lib.LargeListType, pyarrow.lib.StructType, pyarrow.lib.MapType)):
++        if isinstance(
++            field.type,
++            (
++                pyarrow.lib.ListType,
++                pyarrow.lib.LargeListType,
++                pyarrow.lib.StructType,
++                pyarrow.lib.MapType,
++            ),
++        ):
+             processed_fields2.extend(_process_nested_type(field.type, field.name))
+         else:
+-            processed_fields2.append({
+-                'col_name': field.name,
+-                'type': str(field.type)
+-            })
++            processed_fields2.append({"col_name": field.name, "type": str(field.type)})
+ 
+     # Convert processed fields to polars DataFrame
+-    schema1_df = pl.DataFrame({
+-        'SCH_TABLE': ["pq"] * len(processed_fields1),
+-        'COL_NAME': [f['col_name'] for f in processed_fields1],
+-        'DATA_TYPE': [f['type'] for f in processed_fields1]
+-    })
+-
+-    schema2_df = pl.DataFrame({
+-        'SCH_TABLE': ["pq"] * len(processed_fields2),
+-        'COL_NAME': [f['col_name'] for f in processed_fields2],
+-        'DATA_TYPE': [f['type'] for f in processed_fields2]
+-    })
++    schema1_df = pl.DataFrame(
++        {
++            "SCH_TABLE": ["pq"] * len(processed_fields1),
++            "COL_NAME": [f["col_name"] for f in processed_fields1],
++            "DATA_TYPE": [f["type"] for f in processed_fields1],
++        }
++    )
++
++    schema2_df = pl.DataFrame(
++        {
++            "SCH_TABLE": ["pq"] * len(processed_fields2),
++            "COL_NAME": [f["col_name"] for f in processed_fields2],
++            "DATA_TYPE": [f["type"] for f in processed_fields2],
++        }
++    )
+ 
+     return schema1_df, schema2_df
+ 
+@@ -137,92 +171,106 @@ def compare_and_unnest_parquet_schema(source_path, target_path):
+ def read_files(source_path, target_path):
+     """Read source and target files using Polars"""
+     # Check if files are Parquet
+-    if source_path.endswith('.parquet') and target_path.endswith('.parquet'):
++    if source_path.endswith(".parquet") and target_path.endswith(".parquet"):
+         # For Parquet files, only load the schema information
+-        source_df, target_df = compare_and_unnest_parquet_schema(source_path, target_path)
++        source_df, target_df = compare_and_unnest_parquet_schema(
++            source_path, target_path
++        )
+     else:
+         source_df = pl.read_csv(source_path)
+         target_df = pl.read_csv(target_path)
+ 
+         # Handle missing DATA_TYPE column
+-        if 'DATA_TYPE' not in source_df.columns:
+-            source_df = source_df.with_columns(pl.lit("N/A").alias('DATA_TYPE'))
+-        if 'DATA_TYPE' not in target_df.columns:
+-            target_df = target_df.with_columns(pl.lit("N/A").alias('DATA_TYPE'))
++        if "DATA_TYPE" not in source_df.columns:
++            source_df = source_df.with_columns(pl.lit("N/A").alias("DATA_TYPE"))
++        if "DATA_TYPE" not in target_df.columns:
++            target_df = target_df.with_columns(pl.lit("N/A").alias("DATA_TYPE"))
+ 
+         # Create SCH_TABLE column - concatenate SCH and NAME if SCH exists, otherwise use NAME
+-        if 'SCH' in source_df.columns:
+-            source_df = source_df.with_columns(pl.concat_str([pl.col('SCH'), pl.lit('.'), pl.col('TABLE_NAME')]).alias('SCH_TABLE'))
++        if "SCH" in source_df.columns:
++            source_df = source_df.with_columns(
++                pl.concat_str([pl.col("SCH"), pl.lit("."), pl.col("TABLE_NAME")]).alias(
++                    "SCH_TABLE"
++                )
++            )
+         else:
+-            source_df = source_df.with_columns(pl.col('TABLE_NAME').alias('SCH_TABLE'))
+-
+-        if 'SCH' in target_df.columns:
+-            target_df = target_df.with_columns(pl.concat_str([pl.col('SCH'), pl.lit('.'), pl.col('TABLE_NAME')]).alias('SCH_TABLE'))
++            source_df = source_df.with_columns(pl.col("TABLE_NAME").alias("SCH_TABLE"))
++
++        if "SCH" in target_df.columns:
++            target_df = target_df.with_columns(
++                pl.concat_str([pl.col("SCH"), pl.lit("."), pl.col("TABLE_NAME")]).alias(
++                    "SCH_TABLE"
++                )
++            )
+         else:
+-            target_df = target_df.with_columns(pl.col('TABLE_NAME').alias('SCH_TABLE'))
+-            
++            target_df = target_df.with_columns(pl.col("TABLE_NAME").alias("SCH_TABLE"))
++
+     return source_df, target_df
+ 
+ 
+ def compare_tables(source_df, target_df):
+     """Compare tables between source and target"""
+-    source_tables = set(source_df['SCH_TABLE'].unique())
+-    target_tables = set(target_df['SCH_TABLE'].unique())
+-    
++    source_tables = set(source_df["SCH_TABLE"].unique())
++    target_tables = set(target_df["SCH_TABLE"].unique())
++
+     common_tables = source_tables.intersection(target_tables)
+     source_only = source_tables - target_tables
+     target_only = target_tables - source_tables
+-    
++
+     return {
+-        'common': sorted(list(common_tables)),
+-        'source_only': sorted(list(source_only)),
+-        'target_only': sorted(list(target_only))
++        "common": sorted(list(common_tables)),
++        "source_only": sorted(list(source_only)),
++        "target_only": sorted(list(target_only)),
+     }
+ 
+ 
+ def compare_columns(source_df, target_df, table_name):
+     """Compare columns for a specific table"""
+-    source_cols = source_df.filter(pl.col('SCH_TABLE') == table_name).select(['COL_NAME', 'DATA_TYPE'])
+-    target_cols = target_df.filter(pl.col('SCH_TABLE') == table_name).select(['COL_NAME', 'DATA_TYPE'])
++    source_cols = source_df.filter(pl.col("SCH_TABLE") == table_name).select(
++        ["COL_NAME", "DATA_TYPE"]
++    )
++    target_cols = target_df.filter(pl.col("SCH_TABLE") == table_name).select(
++        ["COL_NAME", "DATA_TYPE"]
++    )
++
++    source_cols_set = set(source_cols["COL_NAME"].to_list())
++    target_cols_set = set(target_cols["COL_NAME"].to_list())
+ 
+-    source_cols_set = set(source_cols['COL_NAME'].to_list())
+-    target_cols_set = set(target_cols['COL_NAME'].to_list())
+-    
+     common_cols = source_cols_set.intersection(target_cols_set)
+     source_only = source_cols_set - target_cols_set
+     target_only = target_cols_set - source_cols_set
+-    
++
+     # Compare data types for common columns
+     datatype_mismatches = []
+     for col in common_cols:
+-        source_type = source_cols.filter(pl.col('COL_NAME') == col)['DATA_TYPE'].item()
+-        target_type = target_cols.filter(pl.col('COL_NAME') == col)['DATA_TYPE'].item()
++        source_type = source_cols.filter(pl.col("COL_NAME") == col)["DATA_TYPE"].item()
++        target_type = target_cols.filter(pl.col("COL_NAME") == col)["DATA_TYPE"].item()
+         if not are_types_compatible(source_type, target_type):
+-            datatype_mismatches.append({
+-                'column': col,
+-                'source_type': source_type,
+-                'target_type': target_type
+-            })
+-    
++            datatype_mismatches.append(
++                {"column": col, "source_type": source_type, "target_type": target_type}
++            )
++
+     return {
+-        'common': sorted(list(common_cols)),
+-        'source_only': sorted(list(source_only)),
+-        'target_only': sorted(list(target_only)),
+-        'datatype_mismatches': datatype_mismatches
++        "common": sorted(list(common_cols)),
++        "source_only": sorted(list(source_only)),
++        "target_only": sorted(list(target_only)),
++        "datatype_mismatches": datatype_mismatches,
+     }
+ 
+ 
+ def format_worksheet(ws):
+     """Apply formatting to worksheet"""
+-    header_fill = PatternFill(start_color='366092', end_color='366092', fill_type='solid')
+-    header_font = Font(color='FFFFFF', bold=True)
+-    
++    header_fill = PatternFill(
++        start_color="366092", end_color="366092", fill_type="solid"
++    )
++    header_font = Font(color="FFFFFF", bold=True)
++
+     # Format headers
+     for cell in ws[1]:
+         cell.fill = header_fill
+         cell.font = header_font
+-        cell.alignment = Alignment(horizontal='center')
+-    
++        cell.alignment = Alignment(horizontal="center")
++
+     # Adjust column widths
+     for column in ws.columns:
+         max_length = 0
+@@ -242,89 +290,94 @@ def format_worksheet(ws):
+ def create_excel_report(comparison_results, source_df, target_df, table_name):
+     """Create formatted Excel report"""
+     wb = Workbook()
+-    
++
+     # Table Comparison Sheet
+     ws_tables = wb.active
+     ws_tables.title = "Table Comparison"
+-    ws_tables.append(['Category', 'Table Name'])
+-    
+-    for table in comparison_results['tables']['common']:
+-        ws_tables.append(['Common', table])
+-    for table in comparison_results['tables']['source_only']:
+-        ws_tables.append(['Source Only', table])
+-    for table in comparison_results['tables']['target_only']:
+-        ws_tables.append(['Target Only', table])
+-    
++    ws_tables.append(["Category", "Table Name"])
++
++    for table in comparison_results["tables"]["common"]:
++        ws_tables.append(["Common", table])
++    for table in comparison_results["tables"]["source_only"]:
++        ws_tables.append(["Source Only", table])
++    for table in comparison_results["tables"]["target_only"]:
++        ws_tables.append(["Target Only", table])
++
+     format_worksheet(ws_tables)
+-    
++
+     # Column Comparison Sheet
+     ws_columns = wb.create_sheet("Column Comparison")
+-    ws_columns.append(['Table Name', 'Column Name', 'Status', 'Source Type', 'Target Type'])
+-    
+-    for table in comparison_results['columns']:
++    ws_columns.append(
++        ["Table Name", "Column Name", "Status", "Source Type", "Target Type"]
++    )
++
++    for table in comparison_results["columns"]:
+         # Get all columns from source and target for this table
+-        table_name = table['table_name']
+-        source_cols = source_df.filter(pl.col('SCH_TABLE') == table_name).select(['COL_NAME', 'DATA_TYPE'])
+-        target_cols = target_df.filter(pl.col('SCH_TABLE') == table_name).select(['COL_NAME', 'DATA_TYPE'])
+-        
++        table_name = table["table_name"]
++        source_cols = source_df.filter(pl.col("SCH_TABLE") == table_name).select(
++            ["COL_NAME", "DATA_TYPE"]
++        )
++        target_cols = target_df.filter(pl.col("SCH_TABLE") == table_name).select(
++            ["COL_NAME", "DATA_TYPE"]
++        )
++
+         # Create dictionaries for easy lookup
+-        source_types = dict(zip(source_cols['COL_NAME'], source_cols['DATA_TYPE']))
+-        target_types = dict(zip(target_cols['COL_NAME'], target_cols['DATA_TYPE']))
+-        
++        source_types = dict(zip(source_cols["COL_NAME"], source_cols["DATA_TYPE"]))
++        target_types = dict(zip(target_cols["COL_NAME"], target_cols["DATA_TYPE"]))
++
+         # Process all columns
+         all_columns = sorted(set(list(source_types.keys()) + list(target_types.keys())))
+-        
++
+         for col in all_columns:
+-            source_type = source_types.get(col, 'N/A')
+-            target_type = target_types.get(col, 'N/A')
+-            
+-            if col in table['source_only']:
+-                status = 'Source Only'
+-            elif col in table['target_only']:
+-                status = 'Target Only'
++            source_type = source_types.get(col, "N/A")
++            target_type = target_types.get(col, "N/A")
++
++            if col in table["source_only"]:
++                status = "Source Only"
++            elif col in table["target_only"]:
++                status = "Target Only"
+             else:  # Column exists in both
+                 if are_types_compatible(source_type, target_type):
+-                    status = 'Matching'
++                    status = "Matching"
+                 else:
+-                    status = 'Different Types'
+-            
+-            ws_columns.append([
+-                table['table_name'],
+-                col,
+-                status,
+-                source_type,
+-                target_type
+-            ])
+-    
++                    status = "Different Types"
++
++            ws_columns.append(
++                [table["table_name"], col, status, source_type, target_type]
++            )
++
+     format_worksheet(ws_columns)
+-    
++
+     # Datatype Mismatches Sheet
+     ws_datatypes = wb.create_sheet("Datatype Mismatches")
+-    ws_datatypes.append(['Table Name', 'Column Name', 'Source Type', 'Target Type'])
+-    
+-    for table in comparison_results['columns']:
+-        for mismatch in table['datatype_mismatches']:
+-            ws_datatypes.append([
+-                table['table_name'],
+-                mismatch['column'],
+-                mismatch['source_type'],
+-                mismatch['target_type']
+-            ])
+-    
++    ws_datatypes.append(["Table Name", "Column Name", "Source Type", "Target Type"])
++
++    for table in comparison_results["columns"]:
++        for mismatch in table["datatype_mismatches"]:
++            ws_datatypes.append(
++                [
++                    table["table_name"],
++                    mismatch["column"],
++                    mismatch["source_type"],
++                    mismatch["target_type"],
++                ]
++            )
++
+     format_worksheet(ws_datatypes)
+-    
++
+     # Save the workbook with timestamp
+     os.makedirs("results", exist_ok=True)
+     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+     if "/" in table_name:
+-        table_name = table_name.split('/')[-1]
++        table_name = table_name.split("/")[-1]
+     wb.save(f"results/{table_name}_{timestamp}.xlsx")
+ 
++
+ def colcompare(args):
+     if isinstance(args, (list, type(None))):
+         # Called from command line
+         parser = argparse.ArgumentParser(
+-            description='Compare column schemas between two CSV or Parquet files',
++            description="Compare column schemas between two CSV or Parquet files",
+             formatter_class=argparse.RawDescriptionHelpFormatter,
+             epilog="""
+ Generates an Excel report with three sheets:
+@@ -333,35 +386,37 @@ Generates an Excel report with three sheets:
+ - Datatype Mismatches: Highlights columns with incompatible types
+ 
+ The report is saved to ./results/ with a timestamp in the filename.
+-            """
++            """,
++        )
++        parser.add_argument("source", help="Path to the source CSV/Parquet file")
++        parser.add_argument("target", help="Path to the target CSV/Parquet file")
++        parser.add_argument(
++            "--verbose", "-v", action="store_true", help="Verbose logging"
+         )
+-        parser.add_argument('source', help='Path to the source CSV/Parquet file')
+-        parser.add_argument('target', help='Path to the target CSV/Parquet file')
+         args = parser.parse_args(args)
+ 
+-    # Read source and target files
+-    source_df, target_df = read_files(args.source, args.target)
+-    
+-    # Compare tables
+-    table_comparison = compare_tables(source_df, target_df)
+-    
+-    # Compare columns for common tables
+-    column_comparisons = []
+-    for table in table_comparison['common']:
+-        column_comparison = compare_columns(source_df, target_df, table)
+-        column_comparisons.append({
+-            'table_name': table,
+-            **column_comparison
+-        })
+-    
+-    # Create comparison results dictionary
+-    comparison_results = {
+-        'tables': table_comparison,
+-        'columns': column_comparisons
+-    }
+-    table_name = args.target.split('.')[1].strip('/')
+-    # Generate Excel report
+-    create_excel_report(comparison_results, source_df, target_df, table_name)
++        # Setup logging if called from command line
++        setup_logging(args.verbose)
++
++    with Timer("Column comparison"):
++        # Read source and target files
++        source_df, target_df = read_files(args.source, args.target)
++
++        # Compare tables
++        table_comparison = compare_tables(source_df, target_df)
++
++        # Compare columns for common tables
++        column_comparisons = []
++        for table in table_comparison["common"]:
++            column_comparison = compare_columns(source_df, target_df, table)
++            column_comparisons.append({"table_name": table, **column_comparison})
++
++        # Create comparison results dictionary
++        comparison_results = {"tables": table_comparison, "columns": column_comparisons}
++        table_name = args.target.split(".")[1].strip("/")
++        # Generate Excel report
++        create_excel_report(comparison_results, source_df, target_df, table_name)
++
+ 
+ if __name__ == "__main__":
+     colcompare()
+diff --git a/dbqt/tools/combine.py b/dbqt/tools/combine.py
+index 7f724fb..5db9671 100644
+--- a/dbqt/tools/combine.py
++++ b/dbqt/tools/combine.py
+@@ -4,6 +4,7 @@ import pyarrow.parquet as pq
+ import pyarrow as pa
+ from pathlib import Path
+ 
++
+ def read_and_validate_schema(file_path):
+     """Try to read a file as Parquet and return its schema and table if successful"""
+     try:
+@@ -12,31 +13,37 @@ def read_and_validate_schema(file_path):
+     except Exception as e:
+         return None, None
+ 
++
+ def combine_parquet_files(output_path="combined.parquet", delete_original=False):
+     """
+     Combine all readable Parquet files in the current directory and subdirectories.
+     For subdirectories containing Parquet files, combines them into a file named after the directory.
+-    
++
+     Args:
+         output_path: Default output path for files in the root directory
+         delete_original: If True, deletes original files after successful combination
+     """
+     cwd = Path.cwd()
+-    
++
+     # First, handle subdirectories
+     subdirs = [d for d in cwd.iterdir() if d.is_dir()]
+     for subdir in subdirs:
+-        files = [f for f in subdir.iterdir() if f.is_file() and f.name.endswith('.parquet')]
++        files = [
++            f for f in subdir.iterdir() if f.is_file() and f.name.endswith(".parquet")
++        ]
+         if files:
+             # Use directory name as output filename
+             subdir_output = subdir / f"{subdir.name}.parquet"
+             _combine_files(files, subdir_output, delete_original)
+-    
++
+     # Then handle files in root directory
+-    root_files = [f for f in cwd.iterdir() if f.is_file() and f.name.endswith('.parquet')]
++    root_files = [
++        f for f in cwd.iterdir() if f.is_file() and f.name.endswith(".parquet")
++    ]
+     if root_files:
+         _combine_files(root_files, output_path, delete_original)
+-    
++
++
+ def _combine_files(files, output_path: str | Path, delete_original=False):
+     """Helper function to combine a list of Parquet files"""
+     output_path = Path(output_path)
+@@ -47,14 +54,14 @@ def _combine_files(files, output_path: str | Path, delete_original=False):
+     reference_schema = None
+     tables = []
+     files_to_delete = []
+-    
++
+     print(f"\nScanning {len(files)} files in {files[0].parent}...")
+-    
++
+     for file_path in files:
+         output_path = Path(output_path)
+         if file_path.name == output_path.name:
+             continue
+-            
++
+         schema, table = read_and_validate_schema(file_path)
+         if schema is not None:
+             if reference_schema is None:
+@@ -70,27 +77,28 @@ def _combine_files(files, output_path: str | Path, delete_original=False):
+                 print(f"Skipping {file_path.name} - schema mismatch")
+         else:
+             print(f"Skipping {file_path.name} - not a valid Parquet file")
+-    
++
+     if not tables:
+         print("No valid Parquet files found")
+         return
+-    
++
+     # Combine tables and write output
+     combined_table = pa.concat_tables(tables)
+     pq.write_table(combined_table, output_path)
+     print(f"\nCombined {len(tables)} files into {output_path}")
+     print(f"Total rows: {len(combined_table)}")
+-    
++
+     # Delete original files if requested
+     if delete_original:
+         for file_path in files_to_delete:
+             file_path.unlink()
+             print(f"Deleted {file_path}")
+ 
++
+ def main(args=None):
+     """Main entry point for the combine tool"""
+     parser = argparse.ArgumentParser(
+-        description='Combine multiple Parquet files in the current directory and subdirectories',
++        description="Combine multiple Parquet files in the current directory and subdirectories",
+         formatter_class=argparse.RawDescriptionHelpFormatter,
+         epilog="""
+ Scans the current directory and subdirectories for Parquet files and combines them if they share
+@@ -101,19 +109,27 @@ For files in subdirectories, the combined output is named after the directory:
+ 
+ For files in the root directory, the output is written to the specified output file
+ (defaults to combined.parquet).
+-        """
++        """,
++    )
++    parser.add_argument(
++        "output",
++        nargs="?",
++        default="combined.parquet",
++        help="Output filename for root directory files (default: combined.parquet)",
+     )
+-    parser.add_argument('output', nargs='?', default='combined.parquet',
+-                       help='Output filename for root directory files (default: combined.parquet)')
+-    parser.add_argument('--delete-original', action='store_true',
+-                       help='Delete original files after successful combination')
+-    
++    parser.add_argument(
++        "--delete-original",
++        action="store_true",
++        help="Delete original files after successful combination",
++    )
++
+     if args is None:
+         args = parser.parse_args()
+     else:
+         args = parser.parse_args(args)
+-    
++
+     combine_parquet_files(args.output, args.delete_original)
+ 
++
+ if __name__ == "__main__":
+     main()
+diff --git a/dbqt/tools/dbstats.py b/dbqt/tools/dbstats.py
+index 1f6a5a5..02af593 100644
+--- a/dbqt/tools/dbstats.py
++++ b/dbqt/tools/dbstats.py
+@@ -1,21 +1,16 @@
+-import yaml
+ import polars as pl
+ import logging
+ import threading
+-from concurrent.futures import ThreadPoolExecutor, as_completed
+-from dbqt.connections import create_connector
++from dbqt.tools.utils import load_config, ConnectionPool, setup_logging, Timer
+ 
+-logging.basicConfig(
+-    level=logging.INFO,
+-    format='%(asctime)s - %(name)s - [%(threadName)s] - %(levelname)s - %(message)s'
+-)
+ logger = logging.getLogger(__name__)
+ 
++
+ def get_row_count_for_table(connector, table_name):
+     """Get row count for a single table using a shared connector."""
+     # Set a more descriptive thread name
+     threading.current_thread().name = f"Table-{table_name}"
+-    
++
+     try:
+         count = connector.count_rows(table_name)
+         logger.info(f"Table {table_name}: {count} rows")
+@@ -24,63 +19,37 @@ def get_row_count_for_table(connector, table_name):
+         logger.error(f"Error getting count for {table_name}: {str(e)}")
+         return table_name, -1
+ 
++
+ def get_table_stats(config_path: str):
+-    # Load config
+-    with open(config_path, 'r') as f:
+-        config = yaml.safe_load(f)
+-    
+-    # Read tables CSV using polars
+-    df = pl.read_csv(config['tables_file'])
+-    table_names = df['table_name'].to_list()
+-    
+-    # Create a pool of 10 connectors that will be reused
+-    max_workers = 10
+-    connectors = []
+-    
+-    logger.info(f"Creating {max_workers} database connections...")
+-    for i in range(max_workers):
+-        connector = create_connector(config['connection'])
+-        connector.connect()
+-        connectors.append(connector)
+-    
+-    try:
+-        # Use ThreadPoolExecutor with shared connectors
+-        row_counts = {}
+-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+-            # Submit all tasks, cycling through available connectors
+-            future_to_table = {}
+-            for i, table_name in enumerate(table_names):
+-                connector = connectors[i % max_workers]  # Round-robin assignment
+-                future = executor.submit(get_row_count_for_table, connector, table_name)
+-                future_to_table[future] = table_name
+-            
+-            # Collect results as they complete
+-            for future in as_completed(future_to_table):
+-                table_name, count = future.result()
+-                row_counts[table_name] = count
+-    
+-    finally:
+-        # Clean up all connections
+-        logger.info("Closing database connections...")
+-        for connector in connectors:
+-            try:
+-                connector.disconnect()
+-            except Exception as e:
+-                logger.warning(f"Error closing connection: {str(e)}")
+-    
+-    # Create ordered list of row counts matching the original table order
+-    ordered_row_counts = [row_counts[table_name] for table_name in table_names]
+-    
+-    # Add row counts to dataframe and save
+-    df = df.with_columns(pl.Series("row_count", ordered_row_counts))
+-    df.write_csv(config['tables_file'])
+-    
+-    logger.info(f"Updated row counts in {config['tables_file']}")
++    with Timer("Database statistics collection"):
++        # Load config
++        config = load_config(config_path)
++
++        # Read tables CSV using polars
++        df = pl.read_csv(config["tables_file"])
++        table_names = df["table_name"].to_list()
++
++        max_workers = config.get("max_workers", 4)
++
++        with ConnectionPool(config, max_workers) as pool:
++            # Execute parallel processing
++            row_counts = pool.execute_parallel(get_row_count_for_table, table_names)
++
++        # Create ordered list of row counts matching the original table order
++        ordered_row_counts = [row_counts[table_name] for table_name in table_names]
++
++        # Add row counts to dataframe and save
++        df = df.with_columns(pl.Series("row_count", ordered_row_counts))
++        df.write_csv(config["tables_file"])
++
++        logger.info(f"Updated row counts in {config['tables_file']}")
++
+ 
+ def main(args=None):
+     import argparse
++
+     parser = argparse.ArgumentParser(
+-        description='Get row counts for database tables specified in a config file',
++        description="Get row counts for database tables specified in a config file",
+         formatter_class=argparse.RawDescriptionHelpFormatter,
+         epilog="""
+ Example config.yaml:
+@@ -90,16 +59,23 @@ Example config.yaml:
+         password: mypass
+         host: myorg.snowflakecomputing.com
+     tables_file: tables.csv
+-        """
++        """,
+     )
+-    parser.add_argument('config_file', help='YAML config file containing database connection and tables list')
+-    
++    parser.add_argument(
++        "--config",
++        required=True,
++        help="YAML config file containing database connection and tables list",
++    )
++    parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
++
+     if args is None:
+         args = parser.parse_args()
+     else:
+         args = parser.parse_args(args)
+-    
+-    get_table_stats(args.config_file)
++
++    setup_logging(args.verbose)
++    get_table_stats(args.config)
++
+ 
+ if __name__ == "__main__":
+     main()
+diff --git a/dbqt/tools/dynamic_query.py b/dbqt/tools/dynamic_query.py
+index 7349eb7..ef28a96 100644
+--- a/dbqt/tools/dynamic_query.py
++++ b/dbqt/tools/dynamic_query.py
+@@ -4,58 +4,44 @@ Run dynamic queries against Athena using variables from a CSV file.
+ """
+ 
+ import argparse
+-import csv
+-import yaml
+ import logging
+ from dbqt.connections import create_connector
++from dbqt.tools.utils import load_config, read_csv_list, setup_logging, Timer
+ 
+ logger = logging.getLogger(__name__)
+ 
+ 
+-def load_config(config_path: str) -> dict:
+-    """Load configuration from YAML file."""
+-    with open(config_path, 'r') as f:
+-        return yaml.safe_load(f)
+-
+-
+-def read_csv_values(csv_path: str) -> list:
+-    """Read values from CSV file."""
+-    values = []
+-    with open(csv_path, 'r') as f:
+-        reader = csv.reader(f)
+-        for row in reader:
+-            if row and row[0].strip():  # Skip empty rows
+-                values.append(row[0].strip())
+-    return values
+-
+-
+-def run_dynamic_queries(connector, csv_values: list, query_template: str, output_file: str) -> None:
++def run_dynamic_queries(
++    connector, csv_values: list, query_template: str, output_file: str
++) -> None:
+     """
+     Run dynamic queries using variables from CSV file.
+-    
++
+     Args:
+         connector: Database connector instance
+         csv_values: List of values from CSV to substitute in query
+         query_template: Query template with {var_from_csv} placeholder
+         output_file: Path to output file
+     """
+-    logger.info(f"Running dynamic queries for {len(csv_values)} values to {output_file}")
+-    
+-    with open(output_file, 'w') as f:
++    logger.info(
++        f"Running dynamic queries for {len(csv_values)} values to {output_file}"
++    )
++
++    with open(output_file, "w") as f:
+         f.write("-- Generated query results\n")
+-        f.write("-- " + "="*50 + "\n\n")
+-        
++        f.write("-- " + "=" * 50 + "\n\n")
++
+         for i, csv_value in enumerate(csv_values, 1):
+             logger.info(f"Processing value {i}/{len(csv_values)}: {csv_value}")
+-            
++
+             try:
+                 # Substitute the CSV value into the query template
+                 query = query_template.format(var_from_csv=csv_value)
+                 result = connector.run_query(query)
+-                
++
+                 f.write(f"-- Query for: {csv_value}\n")
+                 f.write(f"-- {query}\n")
+-                
++
+                 if result and len(result) > 0:
+                     # Format the results
+                     for row in result:
+@@ -64,13 +50,15 @@ def run_dynamic_queries(connector, csv_values: list, query_template: str, output
+                 else:
+                     f.write("-- No results returned\n")
+                     logger.warning(f"No results returned for {csv_value}")
+-                    
++
+                 f.write("\n")
+-                    
++
+             except Exception as e:
+                 logger.error(f"Error executing query for {csv_value}: {str(e)}")
+-                f.write(f"-- ERROR: Failed to execute query for {csv_value}: {str(e)}\n\n")
+-    
++                f.write(
++                    f"-- ERROR: Failed to execute query for {csv_value}: {str(e)}\n\n"
++                )
++
+     logger.info(f"Query execution completed. Output written to {output_file}")
+ 
+ 
+@@ -80,69 +68,64 @@ def main(args=None):
+         description="Run dynamic queries against Athena using variables from CSV file"
+     )
+     parser.add_argument(
+-        "--config", 
+-        required=True,
+-        help="Path to Athena configuration YAML file"
++        "--config", required=True, help="Path to Athena configuration YAML file"
+     )
+     parser.add_argument(
+-        "--csv",
+-        required=True,
+-        help="Path to CSV file containing values (one per row)"
++        "--csv", required=True, help="Path to CSV file containing values (one per row)"
+     )
+     parser.add_argument(
+         "--query",
+         required=True,
+-        help="Query template with {var_from_csv} placeholder (e.g., 'SELECT COUNT(1) FROM {var_from_csv}')"
++        help="Query template with {var_from_csv} placeholder (e.g., 'SELECT COUNT(1) FROM {var_from_csv}')",
+     )
+     parser.add_argument(
+         "--output",
+         default="query_results.txt",
+-        help="Output file path (default: query_results.txt)"
++        help="Output file path (default: query_results.txt)",
+     )
+     parser.add_argument(
+-        "--verbose", "-v",
+-        action="store_true",
+-        help="Enable verbose logging"
++        "--verbose", "-v", action="store_true", help="Enable verbose logging"
+     )
+-    
++
+     parsed_args = parser.parse_args(args)
+-    
++
+     # Setup logging
+-    log_level = logging.DEBUG if parsed_args.verbose else logging.INFO
+-    logging.basicConfig(
+-        level=log_level,
+-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
++    setup_logging(
++        parsed_args.verbose, "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+     )
+-    
+-    try:
+-        # Load configuration
+-        config = load_config(parsed_args.config)
+-        
+-        # Ensure it's an Athena configuration
+-        if config.get('connection', {}).get('type') != 'Athena':
+-            raise ValueError("Configuration must be for Athena connector")
+-        
+-        # Read values from CSV
+-        csv_values = read_csv_values(parsed_args.csv)
+-        if not csv_values:
+-            raise ValueError("No values found in CSV file")
+-        
+-        logger.info(f"Found {len(csv_values)} values to process")
+-        
+-        # Create connector and connect
+-        connector = create_connector(config['connection'])
+-        connector.connect()
+-        
++
++    with Timer("Dynamic query execution"):
+         try:
+-            # Run dynamic queries
+-            run_dynamic_queries(connector, csv_values, parsed_args.query, parsed_args.output)
+-        finally:
+-            connector.disconnect()
+-            
+-    except Exception as e:
+-        logger.error(f"Error: {str(e)}")
+-        return 1
+-    
++            # Load configuration
++            config = load_config(parsed_args.config)
++
++            # Ensure it's an Athena configuration
++            if config.get("connection", {}).get("type") != "Athena":
++                raise ValueError("Configuration must be for Athena connector")
++
++            # Read values from CSV
++            csv_values = read_csv_list(parsed_args.csv)
++            if not csv_values:
++                raise ValueError("No values found in CSV file")
++
++            logger.info(f"Found {len(csv_values)} values to process")
++
++            # Create connector and connect
++            connector = create_connector(config["connection"])
++            connector.connect()
++
++            try:
++                # Run dynamic queries
++                run_dynamic_queries(
++                    connector, csv_values, parsed_args.query, parsed_args.output
++                )
++            finally:
++                connector.disconnect()
++
++        except Exception as e:
++            logger.error(f"Error: {str(e)}")
++            return 1
++
+     return 0
+ 
+ 
+diff --git a/dbqt/tools/nullcheck.py b/dbqt/tools/nullcheck.py
+index 7b5f097..b9032ac 100644
+--- a/dbqt/tools/nullcheck.py
++++ b/dbqt/tools/nullcheck.py
+@@ -1,37 +1,24 @@
+ """Check for columns where all records are null across Snowflake tables."""
+ 
+ import argparse
+-import csv
+-import yaml
+ import logging
+-from dbqt.connections import create_connector
++import threading
++from dbqt.tools.utils import (
++    load_config,
++    read_csv_list,
++    ConnectionPool,
++    setup_logging,
++    Timer,
++)
+ 
+ logger = logging.getLogger(__name__)
+ 
+ 
+-def load_config(config_path: str) -> dict:
+-    with open(config_path, 'r') as f:
+-        return yaml.safe_load(f)
+-
+-
+-def read_table_list(csv_path: str) -> list:
+-    tables = []
+-    with open(csv_path, 'r') as f:
+-        reader = csv.reader(f)
+-        for i, row in enumerate(reader):
+-            if row and row[0].strip():
+-                # Skip header if first row is "table_name"
+-                if i == 0 and row[0].strip().lower() == 'table_name':
+-                    continue
+-                tables.append(row[0].strip())
+-    return tables
+-
+-
+ def get_table_columns(connector, tables: list) -> dict:
+-    database = connector.config['database']
+-    schema = connector.config['schema']
++    database = connector.config["database"]
++    schema = connector.config["schema"]
+     table_list = "', '".join(tables)
+-    
++
+     query = f"""
+     SELECT UPPER(TABLE_NAME), UPPER(COLUMN_NAME)
+     FROM INFORMATION_SCHEMA.COLUMNS
+@@ -40,124 +27,137 @@ def get_table_columns(connector, tables: list) -> dict:
+     AND UPPER(TABLE_NAME) IN ('{table_list}')
+     ORDER BY TABLE_NAME, ORDINAL_POSITION
+     """
+-    
++
+     result = connector.run_query(query)
+     table_columns = {}
+-    
++
+     if result and result.rows:
+         for table_name, column_name in result.rows:
+             if table_name not in table_columns:
+                 table_columns[table_name] = []
+             table_columns[table_name].append(column_name)
+-    
++
+     return table_columns
+ 
+ 
+-def check_null_columns(connector, table_name: str, columns: list) -> dict:
++def check_null_columns_for_table(connector, table_data: tuple) -> tuple:
++    """Check null columns for a single table using a shared connector."""
++    table_name, columns = table_data
++    # Set a more descriptive thread name
++    threading.current_thread().name = f"Table-{table_name}"
++
+     if not columns:
+-        return {}
+-    
++        logger.warning(f"No columns found for table {table_name}")
++        return table_name, {}
++
+     # Count distinct values for all columns in one query
+     distinct_checks = [f"COUNT(DISTINCT {col}) AS {col}_count" for col in columns]
+     query = f"SELECT {', '.join(distinct_checks)} FROM {table_name}"
+-    
++
+     try:
+         result = connector.run_query(query)
+         if result and result.rows:
+             row = result.rows[0]
+-            return {col: int(row[i]) if row[i] else 0 for i, col in enumerate(columns)}
++            column_counts = {
++                col: int(row[i]) if row[i] else 0 for i, col in enumerate(columns)
++            }
++            logger.info(f"Table {table_name}: checked {len(columns)} columns")
++            return table_name, column_counts
+     except Exception as e:
+         logger.error(f"Error checking {table_name}: {e}")
+-    
+-    return {}
++
++    return table_name, {}
+ 
+ 
+ def write_results(output_file: str, results: dict):
+-    with open(output_file, 'w') as f:
++    with open(output_file, "w") as f:
+         f.write("# Null Column Check Results\n\n")
+-        
++
+         all_null_columns = []
+-        
++
+         for table_name, columns in results.items():
+             if not columns:
+                 f.write(f"## {table_name}\nERROR: No columns found\n\n")
+                 continue
+-                
++
+             null_cols = [col for col, count in columns.items() if count == 0]
+             all_null_columns.extend(f"{table_name}.{col}" for col in null_cols)
+-            
++
+             f.write(f"## {table_name}\n")
+             f.write(f"Total columns: {len(columns)}\n")
+-            
++
+             if null_cols:
+                 f.write(f"NULL columns ({len(null_cols)}): {', '.join(null_cols)}\n")
+             else:
+                 f.write("No NULL columns found\n")
+-            
++
+             # Show columns with low distinct counts
+-            low_distinct = [(col, count) for col, count in columns.items() if 0 < count <= 5]
++            low_distinct = [
++                (col, count) for col, count in columns.items() if 0 < count <= 5
++            ]
+             if low_distinct:
+                 f.write(f"Low distinct counts: {dict(low_distinct)}\n")
+             f.write("\n")
+-        
++
+         f.write(f"# Summary\nTotal NULL columns: {len(all_null_columns)}\n")
+         if all_null_columns:
+             f.write(f"NULL columns: {', '.join(all_null_columns)}\n")
+ 
+ 
+ def main(args=None):
+-    parser = argparse.ArgumentParser(description="Check for NULL columns in Snowflake tables")
++    parser = argparse.ArgumentParser(
++        description="Check for NULL columns in Snowflake tables"
++    )
+     parser.add_argument("--config", required=True, help="Snowflake config YAML file")
+     parser.add_argument("--tables", help="CSV file with table names")
+-    parser.add_argument("--output", default="null_columns_report.md", help="Output file")
++    parser.add_argument(
++        "--output", default="null_columns_report.md", help="Output file"
++    )
+     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
+ 
+     parsed_args = parser.parse_args(args)
++    setup_logging(parsed_args.verbose)
+ 
+-    logging.basicConfig(
+-        level=logging.DEBUG if parsed_args.verbose else logging.INFO,
+-        format='%(asctime)s - %(levelname)s - %(message)s'
+-    )
++    with Timer("Null column check"):
++        try:
++            config = load_config(parsed_args.config)
+ 
+-    try:
+-        config = load_config(parsed_args.config)
+-        
+-        if config.get('connection', {}).get('type') != 'Snowflake':
+-            raise ValueError("Must use Snowflake connector")
++            if config.get("connection", {}).get("type") != "Snowflake":
++                raise ValueError("Must use Snowflake connector")
+ 
+-        tables_file = parsed_args.tables or config.get('tables_file')
+-        if not tables_file:
+-            raise ValueError("No tables file specified")
++            tables_file = parsed_args.tables or config.get("tables_file")
++            if not tables_file:
++                raise ValueError("No tables file specified")
+ 
+-        tables = read_table_list(tables_file)
+-        if not tables:
+-            raise ValueError(f"No tables found in {tables_file}")
++            tables = read_csv_list(tables_file, "table_name")
++            if not tables:
++                raise ValueError(f"No tables found in {tables_file}")
+ 
+-        logger.info(f"Checking {len(tables)} tables")
++            logger.info(f"Checking {len(tables)} tables")
+ 
+-        connector = create_connector(config['connection'])
+-        connector.connect()
++            max_workers = config.get("max_workers", 4)
+ 
+-        try:
+-            all_table_columns = get_table_columns(connector, tables)
+-            results = {}
+-            
+-            for table_name in tables:
+-                columns = all_table_columns.get(table_name.upper(), [])
+-                if columns:
+-                    results[table_name] = check_null_columns(connector, table_name, columns)
+-                else:
+-                    results[table_name] = {}
+-                    
+-            write_results(parsed_args.output, results)
+-            logger.info(f"Results written to {parsed_args.output}")
+-            
+-        finally:
+-            connector.disconnect()
++            with ConnectionPool(config, max_workers) as pool:
++                # Get table columns using the first connector
++                all_table_columns = get_table_columns(pool.connectors[0], tables)
+ 
+-    except Exception as e:
+-        logger.error(f"Error: {e}")
+-        return 1
++                # Prepare table data for parallel processing
++                table_data = [
++                    (table_name, all_table_columns.get(table_name.upper(), []))
++                    for table_name in tables
++                ]
++
++                # Execute parallel processing
++                results = pool.execute_parallel(
++                    check_null_columns_for_table, table_data
++                )
++
++                write_results(parsed_args.output, results)
++                logger.info(f"Results written to {parsed_args.output}")
++
++        except Exception as e:
++            logger.error(f"Error: {e}")
++            return 1
+ 
+     return 0
+ 
+diff --git a/dbqt/tools/parquetizer.py b/dbqt/tools/parquetizer.py
+index 5b27061..fa83933 100644
+--- a/dbqt/tools/parquetizer.py
++++ b/dbqt/tools/parquetizer.py
+@@ -2,6 +2,7 @@ import os
+ import argparse
+ from pathlib import Path
+ 
++
+ def is_parquet_file(filepath):
+     """
+     Check if the file at filepath is an Apache Parquet file by reading its magic bytes.
+@@ -10,46 +11,48 @@ def is_parquet_file(filepath):
+     try:
+         with open(filepath, "rb") as f:
+             magic = f.read(4)
+-            if magic != b'PAR1':
++            if magic != b"PAR1":
+                 return False
+             f.seek(-4, os.SEEK_END)
+             magic_end = f.read(4)
+-            return magic_end == b'PAR1'
++            return magic_end == b"PAR1"
+     except Exception:
+         return False
+ 
++
+ def add_parquet_extension(path):
+     """
+-    Recursively find files without extensions (excluding hidden files) 
++    Recursively find files without extensions (excluding hidden files)
+     and add .parquet extension if the file is an Apache Parquet file.
+     """
+     path = Path(path)
+     count = 0
+-    
+-    for item in path.rglob('*'):
++
++    for item in path.rglob("*"):
+         # Skip directories and hidden files
+-        if item.is_dir() or item.name.startswith('.'):
++        if item.is_dir() or item.name.startswith("."):
+             continue
+-            
++
+         # If file has no suffix, check if it's a Parquet file
+         if not item.suffix:
+             if is_parquet_file(item):
+-                new_name = item.with_suffix('.parquet')
++                new_name = item.with_suffix(".parquet")
+                 item.rename(new_name)
+                 print(f"Renamed: {item} -> {new_name}")
+                 count += 1
+             else:
+                 print(f"Skipped (not Parquet): {item}")
+-    
++
+     if count > 0:
+         print(f"\nAdded .parquet extension to {count} files")
+     else:
+         print("No files found requiring .parquet extension")
+ 
++
+ def main(args=None):
+     """Main entry point for the parquetizer tool"""
+     parser = argparse.ArgumentParser(
+-        description='Add .parquet extension to files without extensions',
++        description="Add .parquet extension to files without extensions",
+         formatter_class=argparse.RawDescriptionHelpFormatter,
+         epilog="""
+ Recursively searches the current directory for files without extensions
+@@ -58,17 +61,22 @@ Recursively searches the current directory for files without extensions
+ Example:
+   ./data/file1 -> ./data/file1.parquet
+   ./data/file2 -> ./data/file2.parquet
+-        """
++        """,
++    )
++    parser.add_argument(
++        "directory",
++        nargs="?",
++        default=".",
++        help="Directory to process (default: current directory)",
+     )
+-    parser.add_argument('directory', nargs='?', default='.',
+-                       help='Directory to process (default: current directory)')
+-    
++
+     if args is None:
+         args = parser.parse_args()
+     else:
+         args = parser.parse_args(args)
+-    
++
+     add_parquet_extension(args.directory)
+ 
++
+ if __name__ == "__main__":
+     main()
+diff --git a/dbqt/tools/utils.py b/dbqt/tools/utils.py
+new file mode 100644
+index 0000000..84df307
+--- /dev/null
++++ b/dbqt/tools/utils.py
+@@ -0,0 +1,133 @@
++"""Shared utilities for dbqt tools."""
++
++import csv
++import yaml
++import logging
++import threading
++import time
++from concurrent.futures import ThreadPoolExecutor, as_completed
++from dbqt.connections import create_connector
++
++logger = logging.getLogger(__name__)
++
++
++def load_config(config_path: str) -> dict:
++    """Load configuration from YAML file."""
++    with open(config_path, "r") as f:
++        return yaml.safe_load(f)
++
++
++def read_csv_list(csv_path: str, column_name: str = "table_name") -> list:
++    """Read a list of values from a CSV file."""
++    values = []
++    with open(csv_path, "r") as f:
++        reader = csv.reader(f)
++        for i, row in enumerate(reader):
++            if row and row[0].strip():
++                # Skip header if first row matches the expected column name
++                if i == 0 and row[0].strip().lower() == column_name.lower():
++                    continue
++                values.append(row[0].strip())
++    return values
++
++
++class ConnectionPool:
++    """Manages a pool of database connections for concurrent operations."""
++
++    def __init__(self, config: dict, max_workers: int = 10):
++        self.config = config
++        self.max_workers = max_workers
++        self.connectors = []
++
++    def __enter__(self):
++        logger.info(f"Creating {self.max_workers} database connections...")
++        for i in range(self.max_workers):
++            connector = create_connector(self.config["connection"])
++            connector.connect()
++            self.connectors.append(connector)
++        return self
++
++    def __exit__(self, exc_type, exc_val, exc_tb):
++        logger.info("Closing database connections...")
++        for connector in self.connectors:
++            try:
++                connector.disconnect()
++            except Exception as e:
++                logger.warning(f"Error closing connection: {str(e)}")
++
++    def execute_parallel(self, func, items: list) -> dict:
++        """Execute a function in parallel across items using the connection pool."""
++        results = {}
++        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
++            # Submit all tasks, cycling through available connectors
++            future_to_item = {}
++            for i, item in enumerate(items):
++                connector = self.connectors[
++                    i % self.max_workers
++                ]  # Round-robin assignment
++                future = executor.submit(func, connector, item)
++                future_to_item[future] = item
++
++            # Collect results as they complete
++            for future in as_completed(future_to_item):
++                item = future_to_item[future]
++                try:
++                    result = future.result()
++                    if isinstance(result, tuple) and len(result) == 2:
++                        # Handle (key, value) tuple results
++                        key, value = result
++                        results[key] = value
++                    else:
++                        results[item] = result
++                except Exception as e:
++                    logger.error(f"Error processing {item}: {str(e)}")
++                    results[item] = None
++
++        return results
++
++
++def setup_logging(verbose: bool = False, format_string: str = None):
++    """Setup logging configuration."""
++    if format_string is None:
++        format_string = (
++            "%(asctime)s - %(name)s - [%(threadName)s] - %(levelname)s - %(message)s"
++        )
++
++    logging.basicConfig(
++        level=logging.DEBUG if verbose else logging.INFO,
++        format=format_string,
++    )
++
++
++def format_runtime(seconds: float) -> str:
++    """Format runtime in a human-readable format."""
++    if seconds < 60:
++        return f"{seconds:.2f} seconds"
++    elif seconds < 3600:
++        minutes = int(seconds // 60)
++        remaining_seconds = seconds % 60
++        return f"{minutes}m {remaining_seconds:.2f}s"
++    else:
++        hours = int(seconds // 3600)
++        remaining_minutes = int((seconds % 3600) // 60)
++        remaining_seconds = seconds % 60
++        return f"{hours}h {remaining_minutes}m {remaining_seconds:.2f}s"
++
++
++class Timer:
++    """Context manager for timing operations."""
++
++    def __init__(self, operation_name: str = "Operation"):
++        self.operation_name = operation_name
++        self.start_time = None
++        self.end_time = None
++
++    def __enter__(self):
++        self.start_time = time.time()
++        logger.info(f"{self.operation_name} started")
++        return self
++
++    def __exit__(self, exc_type, exc_val, exc_tb):
++        self.end_time = time.time()
++        runtime = self.end_time - self.start_time
++        logger.info(f"{self.operation_name} completed in {format_runtime(runtime)}")
+diff --git a/pyproject.toml b/pyproject.toml
+index b8b5e25..2943773 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -67,4 +67,5 @@ dev = [
+     "build",
+     "twine",
+     "check-manifest>=0.50",
++    "pre-commit>=4.3.0",
+ ]
