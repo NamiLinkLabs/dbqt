@@ -4,6 +4,7 @@ import csv
 import yaml
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dbqt.connections import create_connector
 
@@ -96,3 +97,37 @@ def setup_logging(verbose: bool = False, format_string: str = None):
         level=logging.DEBUG if verbose else logging.INFO,
         format=format_string,
     )
+
+
+def format_runtime(seconds: float) -> str:
+    """Format runtime in a human-readable format."""
+    if seconds < 60:
+        return f"{seconds:.2f} seconds"
+    elif seconds < 3600:
+        minutes = int(seconds // 60)
+        remaining_seconds = seconds % 60
+        return f"{minutes}m {remaining_seconds:.2f}s"
+    else:
+        hours = int(seconds // 3600)
+        remaining_minutes = int((seconds % 3600) // 60)
+        remaining_seconds = seconds % 60
+        return f"{hours}h {remaining_minutes}m {remaining_seconds:.2f}s"
+
+
+class Timer:
+    """Context manager for timing operations."""
+
+    def __init__(self, operation_name: str = "Operation"):
+        self.operation_name = operation_name
+        self.start_time = None
+        self.end_time = None
+
+    def __enter__(self):
+        self.start_time = time.time()
+        logger.info(f"{self.operation_name} started")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.end_time = time.time()
+        runtime = self.end_time - self.start_time
+        logger.info(f"{self.operation_name} completed in {format_runtime(runtime)}")

@@ -6,7 +6,7 @@ Run dynamic queries against Athena using variables from a CSV file.
 import argparse
 import logging
 from dbqt.connections import create_connector
-from dbqt.tools.utils import load_config, read_csv_list, setup_logging
+from dbqt.tools.utils import load_config, read_csv_list, setup_logging, Timer
 
 logger = logging.getLogger(__name__)
 
@@ -94,36 +94,37 @@ def main(args=None):
         parsed_args.verbose, "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
 
-    try:
-        # Load configuration
-        config = load_config(parsed_args.config)
-
-        # Ensure it's an Athena configuration
-        if config.get("connection", {}).get("type") != "Athena":
-            raise ValueError("Configuration must be for Athena connector")
-
-        # Read values from CSV
-        csv_values = read_csv_list(parsed_args.csv)
-        if not csv_values:
-            raise ValueError("No values found in CSV file")
-
-        logger.info(f"Found {len(csv_values)} values to process")
-
-        # Create connector and connect
-        connector = create_connector(config["connection"])
-        connector.connect()
-
+    with Timer("Dynamic query execution"):
         try:
-            # Run dynamic queries
-            run_dynamic_queries(
-                connector, csv_values, parsed_args.query, parsed_args.output
-            )
-        finally:
-            connector.disconnect()
+            # Load configuration
+            config = load_config(parsed_args.config)
 
-    except Exception as e:
-        logger.error(f"Error: {str(e)}")
-        return 1
+            # Ensure it's an Athena configuration
+            if config.get("connection", {}).get("type") != "Athena":
+                raise ValueError("Configuration must be for Athena connector")
+
+            # Read values from CSV
+            csv_values = read_csv_list(parsed_args.csv)
+            if not csv_values:
+                raise ValueError("No values found in CSV file")
+
+            logger.info(f"Found {len(csv_values)} values to process")
+
+            # Create connector and connect
+            connector = create_connector(config["connection"])
+            connector.connect()
+
+            try:
+                # Run dynamic queries
+                run_dynamic_queries(
+                    connector, csv_values, parsed_args.query, parsed_args.output
+                )
+            finally:
+                connector.disconnect()
+
+        except Exception as e:
+            logger.error(f"Error: {str(e)}")
+            return 1
 
     return 0
 

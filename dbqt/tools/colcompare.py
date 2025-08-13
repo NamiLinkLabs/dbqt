@@ -8,6 +8,10 @@ from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
 import os
 from datetime import datetime
+from dbqt.tools.utils import Timer, setup_logging
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Define type mappings for equivalent data types
 TYPE_MAPPINGS = {
@@ -386,25 +390,32 @@ The report is saved to ./results/ with a timestamp in the filename.
         )
         parser.add_argument("source", help="Path to the source CSV/Parquet file")
         parser.add_argument("target", help="Path to the target CSV/Parquet file")
+        parser.add_argument(
+            "--verbose", "-v", action="store_true", help="Verbose logging"
+        )
         args = parser.parse_args(args)
 
-    # Read source and target files
-    source_df, target_df = read_files(args.source, args.target)
+        # Setup logging if called from command line
+        setup_logging(args.verbose)
 
-    # Compare tables
-    table_comparison = compare_tables(source_df, target_df)
+    with Timer("Column comparison"):
+        # Read source and target files
+        source_df, target_df = read_files(args.source, args.target)
 
-    # Compare columns for common tables
-    column_comparisons = []
-    for table in table_comparison["common"]:
-        column_comparison = compare_columns(source_df, target_df, table)
-        column_comparisons.append({"table_name": table, **column_comparison})
+        # Compare tables
+        table_comparison = compare_tables(source_df, target_df)
 
-    # Create comparison results dictionary
-    comparison_results = {"tables": table_comparison, "columns": column_comparisons}
-    table_name = args.target.split(".")[1].strip("/")
-    # Generate Excel report
-    create_excel_report(comparison_results, source_df, target_df, table_name)
+        # Compare columns for common tables
+        column_comparisons = []
+        for table in table_comparison["common"]:
+            column_comparison = compare_columns(source_df, target_df, table)
+            column_comparisons.append({"table_name": table, **column_comparison})
+
+        # Create comparison results dictionary
+        comparison_results = {"tables": table_comparison, "columns": column_comparisons}
+        table_name = args.target.split(".")[1].strip("/")
+        # Generate Excel report
+        create_excel_report(comparison_results, source_df, target_df, table_name)
 
 
 if __name__ == "__main__":

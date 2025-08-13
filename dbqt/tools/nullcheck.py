@@ -3,7 +3,13 @@
 import argparse
 import logging
 import threading
-from dbqt.tools.utils import load_config, read_csv_list, ConnectionPool, setup_logging
+from dbqt.tools.utils import (
+    load_config,
+    read_csv_list,
+    ConnectionPool,
+    setup_logging,
+    Timer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -112,43 +118,46 @@ def main(args=None):
     parsed_args = parser.parse_args(args)
     setup_logging(parsed_args.verbose)
 
-    try:
-        config = load_config(parsed_args.config)
+    with Timer("Null column check"):
+        try:
+            config = load_config(parsed_args.config)
 
-        if config.get("connection", {}).get("type") != "Snowflake":
-            raise ValueError("Must use Snowflake connector")
+            if config.get("connection", {}).get("type") != "Snowflake":
+                raise ValueError("Must use Snowflake connector")
 
-        tables_file = parsed_args.tables or config.get("tables_file")
-        if not tables_file:
-            raise ValueError("No tables file specified")
+            tables_file = parsed_args.tables or config.get("tables_file")
+            if not tables_file:
+                raise ValueError("No tables file specified")
 
-        tables = read_csv_list(tables_file, "table_name")
-        if not tables:
-            raise ValueError(f"No tables found in {tables_file}")
+            tables = read_csv_list(tables_file, "table_name")
+            if not tables:
+                raise ValueError(f"No tables found in {tables_file}")
 
-        logger.info(f"Checking {len(tables)} tables")
+            logger.info(f"Checking {len(tables)} tables")
 
-        max_workers = config.get("max_workers", 4)
+            max_workers = config.get("max_workers", 4)
 
-        with ConnectionPool(config, max_workers) as pool:
-            # Get table columns using the first connector
-            all_table_columns = get_table_columns(pool.connectors[0], tables)
+            with ConnectionPool(config, max_workers) as pool:
+                # Get table columns using the first connector
+                all_table_columns = get_table_columns(pool.connectors[0], tables)
 
-            # Prepare table data for parallel processing
-            table_data = [
-                (table_name, all_table_columns.get(table_name.upper(), []))
-                for table_name in tables
-            ]
+                # Prepare table data for parallel processing
+                table_data = [
+                    (table_name, all_table_columns.get(table_name.upper(), []))
+                    for table_name in tables
+                ]
 
-            # Execute parallel processing
-            results = pool.execute_parallel(check_null_columns_for_table, table_data)
+                # Execute parallel processing
+                results = pool.execute_parallel(
+                    check_null_columns_for_table, table_data
+                )
 
-            write_results(parsed_args.output, results)
-            logger.info(f"Results written to {parsed_args.output}")
+                write_results(parsed_args.output, results)
+                logger.info(f"Results written to {parsed_args.output}")
 
-    except Exception as e:
-        logger.error(f"Error: {e}")
-        return 1
+        except Exception as e:
+            logger.error(f"Error: {e}")
+            return 1
 
     return 0
 
