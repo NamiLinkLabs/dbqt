@@ -4,29 +4,11 @@ Run dynamic queries against Athena using variables from a CSV file.
 """
 
 import argparse
-import csv
-import yaml
 import logging
 from dbqt.connections import create_connector
+from dbqt.tools.utils import load_config, read_csv_list, setup_logging
 
 logger = logging.getLogger(__name__)
-
-
-def load_config(config_path: str) -> dict:
-    """Load configuration from YAML file."""
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
-
-
-def read_csv_values(csv_path: str) -> list:
-    """Read values from CSV file."""
-    values = []
-    with open(csv_path, "r") as f:
-        reader = csv.reader(f)
-        for row in reader:
-            if row and row[0].strip():  # Skip empty rows
-                values.append(row[0].strip())
-    return values
 
 
 def run_dynamic_queries(
@@ -108,9 +90,8 @@ def main(args=None):
     parsed_args = parser.parse_args(args)
 
     # Setup logging
-    log_level = logging.DEBUG if parsed_args.verbose else logging.INFO
-    logging.basicConfig(
-        level=log_level, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    setup_logging(
+        parsed_args.verbose, "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
 
     try:
@@ -122,7 +103,7 @@ def main(args=None):
             raise ValueError("Configuration must be for Athena connector")
 
         # Read values from CSV
-        csv_values = read_csv_values(parsed_args.csv)
+        csv_values = read_csv_list(parsed_args.csv)
         if not csv_values:
             raise ValueError("No values found in CSV file")
 

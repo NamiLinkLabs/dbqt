@@ -1,30 +1,11 @@
 """Check for columns where all records are null across Snowflake tables."""
 
 import argparse
-import csv
-import yaml
 import logging
-from dbqt.connections import create_connector
+import threading
+from dbqt.tools.utils import load_config, read_csv_list, ConnectionPool, setup_logging
 
 logger = logging.getLogger(__name__)
-
-
-def load_config(config_path: str) -> dict:
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
-
-
-def read_table_list(csv_path: str) -> list:
-    tables = []
-    with open(csv_path, "r") as f:
-        reader = csv.reader(f)
-        for i, row in enumerate(reader):
-            if row and row[0].strip():
-                # Skip header if first row is "table_name"
-                if i == 0 and row[0].strip().lower() == "table_name":
-                    continue
-                tables.append(row[0].strip())
-    return tables
 
 
 def get_table_columns(connector, tables: list) -> dict:
@@ -53,9 +34,15 @@ def get_table_columns(connector, tables: list) -> dict:
     return table_columns
 
 
-def check_null_columns(connector, table_name: str, columns: list) -> dict:
+def check_null_columns_for_table(connector, table_data: tuple) -> tuple:
+    """Check null columns for a single table using a shared connector."""
+    table_name, columns = table_data
+    # Set a more descriptive thread name
+    threading.current_thread().name = f"Table-{table_name}"
+
     if not columns:
-        return {}
+        logger.warning(f"No columns found for table {table_name}")
+        return table_name, {}
 
     # Count distinct values for all columns in one query
     distinct_checks = [f"COUNT(DISTINCT {col}) AS {col}_count" for col in columns]
@@ -65,11 +52,15 @@ def check_null_columns(connector, table_name: str, columns: list) -> dict:
         result = connector.run_query(query)
         if result and result.rows:
             row = result.rows[0]
-            return {col: int(row[i]) if row[i] else 0 for i, col in enumerate(columns)}
+            column_counts = {
+                col: int(row[i]) if row[i] else 0 for i, col in enumerate(columns)
+            }
+            logger.info(f"Table {table_name}: checked {len(columns)} columns")
+            return table_name, column_counts
     except Exception as e:
         logger.error(f"Error checking {table_name}: {e}")
 
-    return {}
+    return table_name, {}
 
 
 def write_results(output_file: str, results: dict):
@@ -119,11 +110,7 @@ def main(args=None):
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
 
     parsed_args = parser.parse_args(args)
-
-    logging.basicConfig(
-        level=logging.DEBUG if parsed_args.verbose else logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-    )
+    setup_logging(parsed_args.verbose)
 
     try:
         config = load_config(parsed_args.config)
@@ -135,33 +122,29 @@ def main(args=None):
         if not tables_file:
             raise ValueError("No tables file specified")
 
-        tables = read_table_list(tables_file)
+        tables = read_csv_list(tables_file, "table_name")
         if not tables:
             raise ValueError(f"No tables found in {tables_file}")
 
         logger.info(f"Checking {len(tables)} tables")
 
-        connector = create_connector(config["connection"])
-        connector.connect()
+        max_workers = config.get("max_workers", 4)
 
-        try:
-            all_table_columns = get_table_columns(connector, tables)
-            results = {}
+        with ConnectionPool(config, max_workers) as pool:
+            # Get table columns using the first connector
+            all_table_columns = get_table_columns(pool.connectors[0], tables)
 
-            for table_name in tables:
-                columns = all_table_columns.get(table_name.upper(), [])
-                if columns:
-                    results[table_name] = check_null_columns(
-                        connector, table_name, columns
-                    )
-                else:
-                    results[table_name] = {}
+            # Prepare table data for parallel processing
+            table_data = [
+                (table_name, all_table_columns.get(table_name.upper(), []))
+                for table_name in tables
+            ]
+
+            # Execute parallel processing
+            results = pool.execute_parallel(check_null_columns_for_table, table_data)
 
             write_results(parsed_args.output, results)
             logger.info(f"Results written to {parsed_args.output}")
-
-        finally:
-            connector.disconnect()
 
     except Exception as e:
         logger.error(f"Error: {e}")
