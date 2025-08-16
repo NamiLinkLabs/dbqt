@@ -14,10 +14,11 @@ def get_row_count_for_table(connector, table_name):
     try:
         count = connector.count_rows(table_name)
         logger.info(f"Table {table_name}: {count} rows")
-        return table_name, count
+        return table_name, (count, None)
     except Exception as e:
-        logger.error(f"Error getting count for {table_name}: {str(e)}")
-        return table_name, -1
+        error_msg = str(e)
+        logger.error(f"Error getting count for {table_name}: {error_msg}")
+        return table_name, (None, error_msg)
 
 
 def get_table_stats(config_path: str):
@@ -27,19 +28,97 @@ def get_table_stats(config_path: str):
 
         # Read tables CSV using polars
         df = pl.read_csv(config["tables_file"])
-        table_names = df["table_name"].to_list()
-
         max_workers = config.get("max_workers", 4)
 
-        with ConnectionPool(config, max_workers) as pool:
-            # Execute parallel processing
-            row_counts = pool.execute_parallel(get_row_count_for_table, table_names)
+        if "source_table" in df.columns and "target_table" in df.columns:
+            source_tables = df["source_table"].to_list()
+            target_tables = df["target_table"].to_list()
+            # Create deterministic list while preserving uniqueness
+            seen = set()
+            table_names = []
+            for table in source_tables + target_tables:
+                if table not in seen:
+                    table_names.append(table)
+                    seen.add(table)
 
-        # Create ordered list of row counts matching the original table order
-        ordered_row_counts = [row_counts[table_name] for table_name in table_names]
+            with ConnectionPool(config, max_workers) as pool:
+                results = pool.execute_parallel(get_row_count_for_table, table_names)
 
-        # Add row counts to dataframe and save
-        df = df.with_columns(pl.Series("row_count", ordered_row_counts))
+            # Separate row counts and error messages
+            source_row_counts = []
+            source_notes = []
+            target_row_counts = []
+            target_notes = []
+
+            for table in source_tables:
+                count, error = results[table]
+                source_row_counts.append(count)
+                source_notes.append(error)
+
+            for table in target_tables:
+                count, error = results[table]
+                target_row_counts.append(count)
+                target_notes.append(error)
+
+            df = df.with_columns(
+                pl.Series("source_row_count", source_row_counts),
+                pl.Series("source_notes", source_notes),
+                pl.Series("target_row_count", target_row_counts),
+                pl.Series("target_notes", target_notes),
+            )
+            cols = df.columns
+
+            # Reorder columns
+            source_rc_col = cols.pop(cols.index("source_row_count"))
+            source_notes_col = cols.pop(cols.index("source_notes"))
+            target_rc_col = cols.pop(cols.index("target_row_count"))
+            target_notes_col = cols.pop(cols.index("target_notes"))
+
+            cols.insert(cols.index("source_table") + 1, source_rc_col)
+            cols.insert(cols.index("source_table") + 2, source_notes_col)
+            cols.insert(cols.index("target_table") + 1, target_rc_col)
+            cols.insert(cols.index("target_table") + 2, target_notes_col)
+            df = df.select(cols)
+
+            # Add difference and percentage difference columns
+            df = df.with_columns(
+                (pl.col("target_row_count") - pl.col("source_row_count")).alias(
+                    "difference"
+                )
+            )
+            df = df.with_columns(
+                (((pl.col("difference") / pl.col("source_row_count")) * 100))
+                .fill_nan(0.0)
+                .alias("percentage_difference")
+            )
+
+        elif "table_name" in df.columns:
+            table_names = df["table_name"].to_list()
+
+            with ConnectionPool(config, max_workers) as pool:
+                # Execute parallel processing
+                results = pool.execute_parallel(get_row_count_for_table, table_names)
+
+            # Separate row counts and error messages
+            ordered_row_counts = []
+            ordered_notes = []
+
+            for table_name in table_names:
+                count, error = results[table_name]
+                ordered_row_counts.append(count)
+                ordered_notes.append(error)
+
+            # Add row counts and notes to dataframe
+            df = df.with_columns(
+                pl.Series("row_count", ordered_row_counts),
+                pl.Series("notes", ordered_notes),
+            )
+        else:
+            logger.error(
+                "CSV file must contain either 'table_name' column or 'source_table' and 'target_table' columns."
+            )
+            return
+
         df.write_csv(config["tables_file"])
 
         logger.info(f"Updated row counts in {config['tables_file']}")

@@ -38,39 +38,83 @@ class ConnectionPool:
         self.config = config
         self.max_workers = max_workers
         self.connectors = []
+        self._lock = threading.Lock()
 
     def __enter__(self):
         logger.info(f"Creating {self.max_workers} database connections...")
-        for i in range(self.max_workers):
-            connector = create_connector(self.config["connection"])
-            connector.connect()
-            self.connectors.append(connector)
+        created_connections = 0
+        try:
+            for i in range(self.max_workers):
+                connector = create_connector(self.config["connection"])
+                connector.connect()
+                self.connectors.append(connector)
+                created_connections += 1
+                logger.debug(
+                    f"Created connection {created_connections}/{self.max_workers}"
+                )
+        except Exception as e:
+            logger.error(
+                f"Failed to create connection {created_connections + 1}: {str(e)}"
+            )
+            # Clean up any connections that were successfully created
+            self._cleanup_connections()
+            raise
+
+        logger.info(f"Successfully created {len(self.connectors)} database connections")
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        logger.info("Closing database connections...")
-        for connector in self.connectors:
-            try:
-                connector.disconnect()
-            except Exception as e:
-                logger.warning(f"Error closing connection: {str(e)}")
+        self._cleanup_connections()
+
+    def _cleanup_connections(self):
+        """Clean up all connections with proper error handling."""
+        with self._lock:
+            if not self.connectors:
+                return
+
+            logger.info(f"Closing {len(self.connectors)} database connections...")
+            failed_disconnects = 0
+
+            for i, connector in enumerate(self.connectors):
+                try:
+                    connector.disconnect()
+                    logger.debug(f"Closed connection {i + 1}/{len(self.connectors)}")
+                except Exception as e:
+                    failed_disconnects += 1
+                    logger.warning(f"Error closing connection {i + 1}: {str(e)}")
+
+            if failed_disconnects > 0:
+                logger.warning(f"Failed to close {failed_disconnects} connections")
+            else:
+                logger.info("All database connections closed successfully")
+
+            self.connectors.clear()
 
     def execute_parallel(self, func, items: list) -> dict:
         """Execute a function in parallel across items using the connection pool."""
+        if not self.connectors:
+            raise RuntimeError("No database connections available")
+
         results = {}
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+        logger.info(
+            f"Processing {len(items)} items with {len(self.connectors)} connections"
+        )
+
+        with ThreadPoolExecutor(max_workers=len(self.connectors)) as executor:
             # Submit all tasks, cycling through available connectors
             future_to_item = {}
             for i, item in enumerate(items):
                 connector = self.connectors[
-                    i % self.max_workers
+                    i % len(self.connectors)
                 ]  # Round-robin assignment
                 future = executor.submit(func, connector, item)
                 future_to_item[future] = item
 
             # Collect results as they complete
+            completed = 0
             for future in as_completed(future_to_item):
                 item = future_to_item[future]
+                completed += 1
                 try:
                     result = future.result()
                     if isinstance(result, tuple) and len(result) == 2:
@@ -79,10 +123,16 @@ class ConnectionPool:
                         results[key] = value
                     else:
                         results[item] = result
+                    logger.debug(f"Completed {completed}/{len(items)}: {item}")
                 except Exception as e:
                     logger.error(f"Error processing {item}: {str(e)}")
-                    results[item] = None
+                    results[item] = (
+                        (None, str(e))
+                        if isinstance(func.__name__, str) and "count" in func.__name__
+                        else None
+                    )
 
+        logger.info(f"Parallel processing completed: {len(results)} results")
         return results
 
 
