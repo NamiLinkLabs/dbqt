@@ -1,6 +1,6 @@
 [project]
 name = "dbqt"
-version = "0.1.11"
+version = "0.1.12"
 description = "DataBase Quality Tool"
 authors = [
     { name = "NamiLink" }
@@ -51,6 +51,7 @@ include = [
     "README.md",
     "pyproject.toml",
     "dbqt/**/*",
+    "tests/",
 ]
 
 [tool.pytest]

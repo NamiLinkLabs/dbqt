@@ -51,9 +51,11 @@ dbqt combine [output.parquet]  # Combines all .parquet files in current director
 
 ### Database Statistics Tool (dbqt dbstats)
 Collect and analyze database statistics:
-- Fetches table row counts in parallel for faster execution.
-- Updates statistics in a CSV file.
-- Configurable through YAML.
+- Fetches table row counts in parallel for faster execution
+- Supports both single table analysis and source/target table comparisons
+- Automatically calculates differences and percentage changes for comparisons
+- Updates statistics in a CSV file with comprehensive error reporting
+- Configurable through YAML
 
 Usage:
 ```bash
@@ -89,7 +91,9 @@ connection:
 tables_file: tables.csv
 ```
 
-The tables.csv file should contain at minimum a `table_name` column. The tool will add/update a `row_count` column with the results.
+The tables.csv file should contain either:
+- A `table_name` column for single table analysis (adds `row_count` and `notes` columns)
+- `source_table` and `target_table` columns for comparison analysis (adds row counts, notes, difference, and percentage difference columns)
 
 ### Null Column Check Tool (dbqt nullcheck)
 Check for columns where all records are null across multiple tables in Snowflake.
