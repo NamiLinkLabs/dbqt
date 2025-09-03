@@ -1,6 +1,6 @@
 [project]
 name = "dbqt"
-version = "0.1.12"
+version = "0.1.13"
 description = "DataBase Quality Tool"
 authors = [
     { name = "NamiLink" }

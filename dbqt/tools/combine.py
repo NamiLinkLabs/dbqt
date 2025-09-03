@@ -14,34 +14,58 @@ def read_and_validate_schema(file_path):
         return None, None
 
 
-def combine_parquet_files(output_path="combined.parquet", delete_original=False):
+def combine_parquet_files(
+    output_path="combined.parquet", delete_original=False, one_file=False
+):
     """
     Combine all readable Parquet files in the current directory and subdirectories.
-    For subdirectories containing Parquet files, combines them into a file named after the directory.
+
+    If one_file is True, combines all files into a single output file in the working directory.
+    Otherwise, maintains backward compatibility by combining files within their own folders.
 
     Args:
-        output_path: Default output path for files in the root directory
+        output_path: Output path for the combined file
         delete_original: If True, deletes original files after successful combination
+        one_file: If True, combines all files into single output in current working directory
     """
     cwd = Path.cwd()
 
-    # First, handle subdirectories
-    subdirs = [d for d in cwd.iterdir() if d.is_dir()]
-    for subdir in subdirs:
-        files = [
-            f for f in subdir.iterdir() if f.is_file() and f.name.endswith(".parquet")
-        ]
-        if files:
-            # Use directory name as output filename
-            subdir_output = subdir / f"{subdir.name}.parquet"
-            _combine_files(files, subdir_output, delete_original)
+    if one_file:
+        # New behavior: combine all files into one output in current working directory
+        all_files = []
 
-    # Then handle files in root directory
-    root_files = [
-        f for f in cwd.iterdir() if f.is_file() and f.name.endswith(".parquet")
-    ]
-    if root_files:
-        _combine_files(root_files, output_path, delete_original)
+        # Collect all Parquet files from current directory and subdirectories
+        for root, dirs, files in os.walk(cwd):
+            root_path = Path(root)
+            parquet_files = [root_path / f for f in files if f.endswith(".parquet")]
+            all_files.extend(parquet_files)
+
+        if all_files:
+            output_path = cwd / Path(output_path).name
+            _combine_files(all_files, output_path, delete_original)
+        else:
+            print("No Parquet files found in current directory or subdirectories")
+    else:
+        # Original behavior: combine files within their own folders
+        # First, handle subdirectories
+        subdirs = [d for d in cwd.iterdir() if d.is_dir()]
+        for subdir in subdirs:
+            files = [
+                f
+                for f in subdir.iterdir()
+                if f.is_file() and f.name.endswith(".parquet")
+            ]
+            if files:
+                # Use directory name as output filename
+                subdir_output = subdir / f"{subdir.name}.parquet"
+                _combine_files(files, subdir_output, delete_original)
+
+        # Then handle files in root directory
+        root_files = [
+            f for f in cwd.iterdir() if f.is_file() and f.name.endswith(".parquet")
+        ]
+        if root_files:
+            _combine_files(root_files, output_path, delete_original)
 
 
 def _combine_files(files, output_path: str | Path, delete_original=False):
@@ -104,23 +128,25 @@ def main(args=None):
 Scans the current directory and subdirectories for Parquet files and combines them if they share
 the same schema. Files with different schemas are skipped.
 
-For files in subdirectories, the combined output is named after the directory:
-./subdir/file1.parquet + ./subdir/file2.parquet -> ./subdir/subdir.parquet
-
-For files in the root directory, the output is written to the specified output file
-(defaults to combined.parquet).
+By default, files in subdirectories are combined into files named after their directory.
+Use --one-file to combine all files into a single output file in the working directory.
         """,
     )
     parser.add_argument(
         "output",
         nargs="?",
         default="combined.parquet",
-        help="Output filename for root directory files (default: combined.parquet)",
+        help="Output filename for combined file (default: combined.parquet)",
     )
     parser.add_argument(
         "--delete-original",
         action="store_true",
         help="Delete original files after successful combination",
+    )
+    parser.add_argument(
+        "--one-file",
+        action="store_true",
+        help="Force output file to be created in current working directory",
     )
 
     if args is None:
@@ -128,7 +154,7 @@ For files in the root directory, the output is written to the specified output f
     else:
         args = parser.parse_args(args)
 
-    combine_parquet_files(args.output, args.delete_original)
+    combine_parquet_files(args.output, args.delete_original, args.one_file)
 
 
 if __name__ == "__main__":
