@@ -30,6 +30,8 @@ dependencies = [
     "pyarrow>=18.1.0",
     "tqdm>=4.67.1",
     "pyodbc>=5.2.0",
+    "jaydebeapi>=1.2.3",
+    "duckdb>=1.4.0",
 ]
 
 [project.urls]

@@ -1,0 +1,12 @@
+connection:
+  type: DuckDB
+  
+  # Optional: specify a custom database file path
+  # If not specified, defaults to duckdb.db in the current working directory
+  # You can use either 'database' or 'path' parameter
+  database: /path/to/your/database.duckdb
+  # OR
+  # path: ./data/my_database.db
+
+# Optional: specify tables to process
+tables_file: tables.csv
