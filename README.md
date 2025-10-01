@@ -53,20 +53,25 @@ dbqt combine [output.parquet]  # Combines all .parquet files in current director
 Collect and analyze database statistics:
 - Fetches table row counts in parallel for faster execution
 - Supports both single table analysis and source/target table comparisons
+- **NEW: Supports separate source and target database configurations** for cross-database comparisons
 - Automatically calculates differences and percentage changes for comparisons
 - Updates statistics in a CSV file with comprehensive error reporting
 - Configurable through YAML
 
 Usage:
 ```bash
-dbqt dbstats config.yaml
+# Single database mode (source and target in same database)
+dbqt dbstats --config config.yaml
+
+# Dual database mode (source and target in different databases)
+dbqt dbstats --source-config source_config.yaml --target-config target_config.yaml
 ```
 
-Example config.yaml:
+Example config.yaml (single database mode):
 ```yaml
 # Database connection configuration
 connection:
-  type: mysql  # mysql, snowflake, duckdb, csv, parquet, s3parquet
+  type: mysql  # mysql, snowflake, duckdb, csv, parquet, s3parquet, postgresql, sqlserver, athena
   host: localhost
   user: myuser
   password: mypassword
@@ -89,11 +94,47 @@ connection:
 
 # Path to CSV file containing table names to analyze
 tables_file: tables.csv
+
+# Optional: number of parallel workers (default: 4)
+max_workers: 10
+```
+
+Example dual database configuration (for cross-database comparisons):
+
+source_config.yaml:
+```yaml
+connection:
+  type: mysql
+  host: source-db.example.com
+  user: source_user
+  password: source_pass
+  database: source_db
+
+tables_file: tables.csv  # CSV with source_table and target_table columns
+max_workers: 10
+```
+
+target_config.yaml:
+```yaml
+connection:
+  type: snowflake
+  account: myorg.snowflakecomputing.com
+  user: target_user
+  password: target_pass
+  warehouse: COMPUTE_WH
+  database: TARGET_DB
+  schema: PUBLIC
+  role: ANALYST
 ```
 
 The tables.csv file should contain either:
 - A `table_name` column for single table analysis (adds `row_count` and `notes` columns)
 - `source_table` and `target_table` columns for comparison analysis (adds row counts, notes, difference, and percentage difference columns)
+
+**Note:** When using dual database mode (`--source-config` and `--target-config`), the tool will:
+- Connect to the source database to count rows in `source_table` column
+- Connect to the target database to count rows in `target_table` column
+- This enables comparing tables across different database systems (e.g., MySQL to Snowflake migration validation)
 
 ### Null Column Check Tool (dbqt nullcheck)
 Check for columns where all records are null across multiple tables in Snowflake.
