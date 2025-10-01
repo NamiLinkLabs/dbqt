@@ -53,20 +53,25 @@ dbqt combine [output.parquet]  # Combines all .parquet files in current director
 Collect and analyze database statistics:
 - Fetches table row counts in parallel for faster execution
 - Supports both single table analysis and source/target table comparisons
+- **NEW: Supports separate source and target database configurations** for cross-database comparisons
 - Automatically calculates differences and percentage changes for comparisons
 - Updates statistics in a CSV file with comprehensive error reporting
 - Configurable through YAML
 
 Usage:
 ```bash
-dbqt dbstats config.yaml
+# Single database mode (source and target in same database)
+dbqt dbstats --config config.yaml
+
+# Dual database mode (source and target in different databases)
+dbqt dbstats --source-config source_config.yaml --target-config target_config.yaml
 ```
 
-Example config.yaml:
+Example config.yaml (single database mode):
 ```yaml
 # Database connection configuration
 connection:
-  type: mysql  # mysql, snowflake, duckdb, csv, parquet, s3parquet
+  type: mysql  # mysql, snowflake, duckdb, csv, parquet, s3parquet, postgresql, sqlserver, athena
   host: localhost
   user: myuser
   password: mypassword
@@ -89,11 +94,47 @@ connection:
 
 # Path to CSV file containing table names to analyze
 tables_file: tables.csv
+
+# Optional: number of parallel workers (default: 4)
+max_workers: 10
+```
+
+Example dual database configuration (for cross-database comparisons):
+
+source_config.yaml:
+```yaml
+connection:
+  type: mysql
+  host: source-db.example.com
+  user: source_user
+  password: source_pass
+  database: source_db
+
+tables_file: tables.csv  # CSV with source_table and target_table columns
+max_workers: 10
+```
+
+target_config.yaml:
+```yaml
+connection:
+  type: snowflake
+  account: myorg.snowflakecomputing.com
+  user: target_user
+  password: target_pass
+  warehouse: COMPUTE_WH
+  database: TARGET_DB
+  schema: PUBLIC
+  role: ANALYST
 ```
 
 The tables.csv file should contain either:
 - A `table_name` column for single table analysis (adds `row_count` and `notes` columns)
 - `source_table` and `target_table` columns for comparison analysis (adds row counts, notes, difference, and percentage difference columns)
+
+**Note:** When using dual database mode (`--source-config` and `--target-config`), the tool will:
+- Connect to the source database to count rows in `source_table` column
+- Connect to the target database to count rows in `target_table` column
+- This enables comparing tables across different database systems (e.g., MySQL to Snowflake migration validation)
 
 ### Null Column Check Tool (dbqt nullcheck)
 Check for columns where all records are null across multiple tables in Snowflake.
@@ -130,6 +171,58 @@ Usage:
 ```bash
 dbqt parquetizer [directory] # Scans from the specified directory (or current if not provided)
 ```
+
+### Key Finder Tool (dbqt keyfinder)
+Automatically discover composite keys (primary keys) in database tables by analyzing column combinations.
+- Finds minimal composite keys (smallest column combinations that uniquely identify rows)
+- Checks for NULL values (columns with NULLs cannot be part of a key)
+- Prioritizes ID-like columns (columns named `id`, `*_id`, `id_*`) for faster discovery
+- Supports filtering columns with `--include-only` or `--exclude` options
+- Configurable maximum key size and column limits
+- Parallel-safe with progress tracking
+- Works with any supported database connector (Snowflake, MySQL, PostgreSQL, etc.)
+
+Usage:
+```bash
+# Basic usage - find keys in a table
+dbqt keyfinder --config config.yaml --table users
+
+# Limit search to keys of size 3 or less
+dbqt keyfinder --config config.yaml --table orders --max-size 3
+
+# Exclude certain columns from the search
+dbqt keyfinder --config config.yaml --table products --exclude created_at updated_at
+
+# Only search specific columns
+dbqt keyfinder --config config.yaml --table transactions --include-only user_id transaction_date store_id
+
+# Force execution even with high combination counts
+dbqt keyfinder --config config.yaml --table large_table --force
+
+# Verbose output with progress updates
+dbqt keyfinder --config config.yaml --table data --verbose
+```
+
+Example config.yaml:
+```yaml
+connection:
+  type: snowflake
+  user: myuser
+  password: mypass
+  account: myaccount
+  database: mydb
+  schema: myschema
+  warehouse: mywh
+  role: myrole
+```
+
+**Performance Tips:**
+- The tool checks combinations starting from size 1 and stops when it finds minimal keys
+- ID-like columns are checked first for faster discovery
+- Use `--max-size` to limit the search space for tables with many columns
+- Use `--include-only` to focus on specific columns you suspect form a key
+- Use `--max-columns` to limit the number of columns analyzed (default: 20)
+- The tool will warn if the combination count exceeds 50,000 (use `--force` to proceed)
 
 ## 🚀 Future Plans
 

@@ -1,0 +1,30 @@
+# Oracle Database Configuration Example
+# This example shows how to connect to Oracle databases using JDBC
+
+connection:
+  type: Oracle
+  host: oracle-db.example.com
+  port: 1521  # Default Oracle port
+  
+  # Use either service_name (recommended) or sid
+  service_name: ORCL  # Service name for Oracle database
+  # sid: ORCL  # Alternative: use SID instead of service_name
+  
+  user: myuser
+  password: mypassword
+  
+  # Optional: schema name (defaults to username in uppercase)
+  schema: MYSCHEMA
+  
+  # Required: Path to Oracle JDBC driver JAR file
+  # Download from: https://www.oracle.com/database/technologies/appdev/jdbc-downloads.html
+  jdbc_jar_path: /path/to/ojdbc8.jar
+  
+  # Optional: JDBC driver class (default shown below)
+  # jdbc_driver: oracle.jdbc.OracleDriver
+
+# Path to CSV file containing table names to analyze
+tables_file: tables.csv
+
+# Optional: number of parallel workers for operations (default: 4)
+max_workers: 4

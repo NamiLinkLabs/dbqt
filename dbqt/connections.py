@@ -3,6 +3,7 @@ import os
 import logging
 from typing import Optional
 import pyodbc
+import jaydebeapi
 
 import boto3
 import time
@@ -130,7 +131,13 @@ class Snowflake(DBConnector):
 class DuckDB(DBConnector):
     def __init__(self, config):
         super().__init__(config)
-        self.duck_db_path = os.path.join(os.getcwd(), "duckdb.db")
+        # Allow custom path from config, otherwise default to duckdb.db in current directory
+        if config.get("database"):
+            self.duck_db_path = config["database"]
+        elif config.get("path"):
+            self.duck_db_path = config["path"]
+        else:
+            self.duck_db_path = os.path.join(os.getcwd(), "duckdb.db")
 
     @property
     def connection_details(self):
@@ -308,6 +315,116 @@ class SQLServer(DBConnector):
         return [(row[0], row[1]) for row in result]
 
 
+class Oracle(DBConnector):
+    def __init__(self, config):
+        super().__init__(config)
+        self.jdbc_driver = config.get("jdbc_driver", "oracle.jdbc.OracleDriver")
+        self.jdbc_jar_path = config.get("jdbc_jar_path")
+        if not self.jdbc_jar_path:
+            raise ValueError("jdbc_jar_path is required for Oracle connection")
+
+        # Set JAVA_HOME if not already set to help jaydebeapi find JVM
+        if not os.environ.get("JAVA_HOME"):
+            self._set_java_home()
+
+    def _set_java_home(self):
+        """Attempt to find and set JAVA_HOME if not already set."""
+        possible_java_homes = [
+            "/opt/homebrew/opt/openjdk",  # Homebrew on Apple Silicon
+            "/usr/local/opt/openjdk",  # Homebrew on Intel Mac
+            "/Library/Internet Plug-Ins/JavaAppletPlugin.plugin/Contents/Home",  # Oracle Java
+            "/usr/lib/jvm/default-java",  # Linux default
+            "/usr/lib/jvm/java-11-openjdk-amd64",  # Common Linux path
+        ]
+
+        for java_home in possible_java_homes:
+            if os.path.exists(java_home):
+                os.environ["JAVA_HOME"] = java_home
+                self.logger.info(f"Set JAVA_HOME to: {java_home}")
+                return
+
+        self.logger.warning(
+            "Could not automatically detect JAVA_HOME. Please set it manually if connection fails."
+        )
+
+    @property
+    def connection_details(self):
+        # Build JDBC connection string
+        host = self.config["host"]
+        port = self.config.get("port", 1521)
+        service_name = self.config.get("service_name")
+        sid = self.config.get("sid")
+        schema = self.config.get("schema", self.config["user"].upper())
+
+        if service_name:
+            jdbc_url = f"jdbc:oracle:thin:@//{host}:{port}/{service_name}"
+        elif sid:
+            jdbc_url = f"jdbc:oracle:thin:@{host}:{port}:{sid}"
+        else:
+            raise ValueError(
+                "Either 'service_name' or 'sid' must be provided for Oracle connection"
+            )
+
+        return jdbc_url
+
+    def connect(self):
+        self.logger.info(f"Establishing connection to {self.conn_type}")
+        jdbc_url = self.connection_details
+
+        self.connection = jaydebeapi.connect(
+            self.jdbc_driver,
+            jdbc_url,
+            [self.config["user"], self.config["password"]],
+            self.jdbc_jar_path,
+        )
+
+        # Set the current schema if specified
+        schema = self.config.get("schema", self.config["user"].upper())
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(f"ALTER SESSION SET CURRENT_SCHEMA = {schema}")
+            cursor.close()
+            self.logger.info(f"Set current schema to: {schema}")
+        except Exception as e:
+            self.logger.warning(f"Could not set current schema to {schema}: {str(e)}")
+
+        self.logger.info(f"Connection established to {self.conn_type}")
+
+    def disconnect(self):
+        if self.connection:
+            self.logger.info(f"Terminating connection to {self.conn_type}")
+            self.connection.close()
+            self.logger.info(f"Connection terminated for {self.conn_type}")
+
+    def run_query(self, query):
+        self.logger.info(f"Running {self.conn_type} query: {query[:300]}")
+        cursor = self.connection.cursor()
+        cursor.execute(query)
+        result = cursor.fetchall()
+        cursor.close()
+        self.logger.info("Query completed successfully")
+        return result if result else "Success"
+
+    def fetch_table_metadata(self, table_name):
+        # Handle schema.table format
+        if "." in table_name:
+            schema, table = table_name.split(".", 1)
+        else:
+            schema = self.config.get("schema", self.config["user"].upper())
+            table = table_name
+
+        query = f"""
+        SELECT UPPER(COLUMN_NAME) AS COLUMN_NAME, DATA_TYPE
+        FROM ALL_TAB_COLUMNS
+        WHERE UPPER(OWNER) = UPPER('{schema}') 
+        AND UPPER(TABLE_NAME) = UPPER('{table}')
+        ORDER BY COLUMN_ID
+        """
+        self.logger.info(f"Fetching metadata for table: {schema}.{table}")
+        result = self.run_query(query)
+        return [(row[0], row[1]) for row in result]
+
+
 class Athena(DBConnector):
     def __init__(self, config):
         super().__init__(config)
@@ -400,6 +517,7 @@ def create_connector(config):
         "DuckDB": DuckDB,
         "Athena": Athena,
         "SQLServer": SQLServer,
+        "Oracle": Oracle,
     }
     connector_class = connector_map.get(config["type"])
     if not connector_class:
