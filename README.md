@@ -172,6 +172,58 @@ Usage:
 dbqt parquetizer [directory] # Scans from the specified directory (or current if not provided)
 ```
 
+### Key Finder Tool (dbqt keyfinder)
+Automatically discover composite keys (primary keys) in database tables by analyzing column combinations.
+- Finds minimal composite keys (smallest column combinations that uniquely identify rows)
+- Checks for NULL values (columns with NULLs cannot be part of a key)
+- Prioritizes ID-like columns (columns named `id`, `*_id`, `id_*`) for faster discovery
+- Supports filtering columns with `--include-only` or `--exclude` options
+- Configurable maximum key size and column limits
+- Parallel-safe with progress tracking
+- Works with any supported database connector (Snowflake, MySQL, PostgreSQL, etc.)
+
+Usage:
+```bash
+# Basic usage - find keys in a table
+dbqt keyfinder --config config.yaml --table users
+
+# Limit search to keys of size 3 or less
+dbqt keyfinder --config config.yaml --table orders --max-size 3
+
+# Exclude certain columns from the search
+dbqt keyfinder --config config.yaml --table products --exclude created_at updated_at
+
+# Only search specific columns
+dbqt keyfinder --config config.yaml --table transactions --include-only user_id transaction_date store_id
+
+# Force execution even with high combination counts
+dbqt keyfinder --config config.yaml --table large_table --force
+
+# Verbose output with progress updates
+dbqt keyfinder --config config.yaml --table data --verbose
+```
+
+Example config.yaml:
+```yaml
+connection:
+  type: snowflake
+  user: myuser
+  password: mypass
+  account: myaccount
+  database: mydb
+  schema: myschema
+  warehouse: mywh
+  role: myrole
+```
+
+**Performance Tips:**
+- The tool checks combinations starting from size 1 and stops when it finds minimal keys
+- ID-like columns are checked first for faster discovery
+- Use `--max-size` to limit the search space for tables with many columns
+- Use `--include-only` to focus on specific columns you suspect form a key
+- Use `--max-columns` to limit the number of columns analyzed (default: 20)
+- The tool will warn if the combination count exceeds 50,000 (use `--force` to proceed)
+
 ## 🚀 Future Plans
 
 ### Core DBQT Features (Coming Soon)
