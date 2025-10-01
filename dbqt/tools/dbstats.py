@@ -49,8 +49,12 @@ def get_table_stats(
             source_tables = df["source_table"].to_list()
             target_tables = df["target_table"].to_list()
 
+            # Limit workers to number of tables to avoid creating unnecessary connections
+            source_workers = min(max_workers, len(source_tables))
+            target_workers = min(max_workers, len(target_tables))
+
             # Process source and target tables separately with their respective configs
-            with ConnectionPool(source_config, max_workers) as source_pool:
+            with ConnectionPool(source_config, source_workers) as source_pool:
                 source_results = source_pool.execute_parallel(
                     lambda connector, table: get_row_count_for_table(
                         connector, table, "source:"
@@ -58,7 +62,7 @@ def get_table_stats(
                     source_tables,
                 )
 
-            with ConnectionPool(target_config, max_workers) as target_pool:
+            with ConnectionPool(target_config, target_workers) as target_pool:
                 target_results = target_pool.execute_parallel(
                     lambda connector, table: get_row_count_for_table(
                         connector, table, "target:"
@@ -117,7 +121,10 @@ def get_table_stats(
         elif "table_name" in df.columns:
             table_names = df["table_name"].to_list()
 
-            with ConnectionPool(source_config, max_workers) as pool:
+            # Limit workers to number of tables to avoid creating unnecessary connections
+            actual_workers = min(max_workers, len(table_names))
+
+            with ConnectionPool(source_config, actual_workers) as pool:
                 # Execute parallel processing
                 results = pool.execute_parallel(get_row_count_for_table, table_names)
 
