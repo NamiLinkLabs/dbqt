@@ -732,17 +732,18 @@ def keyfinder(
                 )
 
             else:  # source_table/target_table case
-                source_primary_keys = []
+                primary_keys = []
                 source_notes = []
                 source_dedup_tables = []
-                target_primary_keys = []
                 target_notes = []
                 target_dedup_tables = []
 
                 for source, target in zip(source_tables, target_tables):
+                    # Use source table's primary key (should be same for both)
+                    primary_key = None
+
                     # Process source
                     if source is None or str(source) == "null" or source not in results:
-                        source_primary_keys.append(None)
                         source_notes.append(
                             "No table specified"
                             if not source or str(source) == "null"
@@ -751,13 +752,12 @@ def keyfinder(
                         source_dedup_tables.append(None)
                     else:
                         key, error, dedup_table, _ = results[source]
-                        source_primary_keys.append(key)
+                        primary_key = key  # Use source's key as the primary key
                         source_notes.append(error)
                         source_dedup_tables.append(dedup_table)
 
                     # Process target
                     if target is None or str(target) == "null" or target not in results:
-                        target_primary_keys.append(None)
                         target_notes.append(
                             "No table specified"
                             if not target or str(target) == "null"
@@ -766,9 +766,13 @@ def keyfinder(
                         target_dedup_tables.append(None)
                     else:
                         key, error, dedup_table, _ = results[target]
-                        target_primary_keys.append(key)
+                        # If source didn't have a key, use target's key
+                        if primary_key is None:
+                            primary_key = key
                         target_notes.append(error)
                         target_dedup_tables.append(dedup_table)
+
+                    primary_keys.append(primary_key)
 
                 # Find positions of source and target table columns
                 source_table_idx = df.columns.index("source_table")
@@ -790,8 +794,7 @@ def keyfinder(
                         not in [
                             "source_dedup_table",
                             "target_dedup_table",
-                            "source_primary_key",
-                            "target_primary_key",
+                            "primary_key",
                             "source_notes",
                             "target_notes",
                         ]
@@ -804,15 +807,13 @@ def keyfinder(
                         not in [
                             "source_dedup_table",
                             "target_dedup_table",
-                            "source_primary_key",
-                            "target_primary_key",
+                            "primary_key",
                             "source_notes",
                             "target_notes",
                         ]
                     ]
                     + [
-                        "source_primary_key",
-                        "target_primary_key",
+                        "primary_key",
                         "source_notes",
                         "target_notes",
                     ]
@@ -822,8 +823,7 @@ def keyfinder(
                 df = df.with_columns(
                     pl.Series("source_dedup_table", source_dedup_tables),
                     pl.Series("target_dedup_table", target_dedup_tables),
-                    pl.Series("source_primary_key", source_primary_keys),
-                    pl.Series("target_primary_key", target_primary_keys),
+                    pl.Series("primary_key", primary_keys),
                     pl.Series("source_notes", source_notes),
                     pl.Series("target_notes", target_notes),
                 )
