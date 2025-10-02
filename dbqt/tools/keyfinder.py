@@ -2,12 +2,463 @@ import argparse
 import logging
 import polars as pl
 from itertools import combinations
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Set, Dict, Any
+from collections import defaultdict
 from dbqt.tools.utils import load_config, setup_logging, Timer
 from dbqt.connections import create_connector
 from math import comb
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# GORDIAN Algorithm Implementation
+# ============================================================================
+
+
+class PrefixTreeCell:
+    """A cell in a prefix tree node containing a value and metadata."""
+
+    def __init__(self, value, is_leaf=False):
+        self.value = value
+        self.child = None  # Points to child node (for non-leaf cells)
+        self.count = 0  # Counter for leaf cells
+        self.sum_counts = 0  # Sum of all descendant leaf counts
+        self.is_leaf = is_leaf
+
+
+class PrefixTreeNode:
+    """A node in the prefix tree."""
+
+    def __init__(self, attr_no):
+        self.attr_no = attr_no  # Attribute number (level in tree)
+        self.cells = {}  # Dict mapping value -> PrefixTreeCell
+        self.is_leaf = False
+        self.visited = False  # For singleton pruning
+
+    def get_or_create_cell(self, value, is_leaf=False):
+        """Get existing cell or create new one."""
+        if value not in self.cells:
+            self.cells[value] = PrefixTreeCell(value, is_leaf)
+        return self.cells[value]
+
+    def has_multiple_cells(self):
+        """Check if node has more than one cell."""
+        return len(self.cells) > 1
+
+    def get_total_count(self):
+        """Get sum of all counts in this node."""
+        return sum(cell.sum_counts for cell in self.cells.values())
+
+
+class NonKeySet:
+    """Container for maintaining non-redundant non-keys using bitmaps."""
+
+    def __init__(self, num_attributes):
+        self.num_attributes = num_attributes
+        self.non_keys = []  # List of bitmaps representing non-keys
+
+    def _to_bitmap(self, attr_list):
+        """Convert list of attribute indices to bitmap."""
+        bitmap = 0
+        for attr in attr_list:
+            bitmap |= 1 << attr
+        return bitmap
+
+    def _from_bitmap(self, bitmap):
+        """Convert bitmap to list of attribute indices."""
+        attrs = []
+        for i in range(self.num_attributes):
+            if bitmap & (1 << i):
+                attrs.append(i)
+        return attrs
+
+    def _covers(self, nk1_bitmap, nk2_bitmap):
+        """Check if nk1 covers nk2 (nk2 is subset of nk1)."""
+        return (nk2_bitmap & nk1_bitmap) == nk2_bitmap
+
+    def insert(self, attr_list):
+        """Insert a non-key, maintaining non-redundancy."""
+        new_bitmap = self._to_bitmap(attr_list)
+
+        # Check if any existing non-key covers the new one
+        for existing_bitmap in self.non_keys:
+            if self._covers(existing_bitmap, new_bitmap):
+                return False  # Redundant, don't add
+
+        # Remove any existing non-keys that are now covered by new one
+        self.non_keys = [bm for bm in self.non_keys if not self._covers(new_bitmap, bm)]
+
+        # Add the new non-key
+        self.non_keys.append(new_bitmap)
+        return True
+
+    def is_futile(self, attr_list):
+        """Check if searching this attribute combination is futile."""
+        candidate_bitmap = self._to_bitmap(attr_list)
+
+        # Check if any existing non-key is a subset of candidate
+        for nk_bitmap in self.non_keys:
+            if self._covers(candidate_bitmap, nk_bitmap):
+                return True
+        return False
+
+    def get_non_keys(self):
+        """Return list of non-keys as attribute lists."""
+        return [self._from_bitmap(bm) for bm in self.non_keys]
+
+
+def build_prefix_tree(
+    connector, table_name: str, columns: List[str]
+) -> Optional[PrefixTreeNode]:
+    """
+    Build a prefix tree from the table data.
+
+    Returns None if table has no keys (duplicate entities found).
+    """
+    logger.info(f"Building prefix tree for {table_name}...")
+
+    # Create root node
+    root = PrefixTreeNode(0)
+
+    # Fetch all data
+    try:
+        query = f"SELECT {', '.join(columns)} FROM {table_name}"
+        result = connector.run_query(query)
+
+        if not result:
+            logger.warning(f"No data in table {table_name}")
+            return root
+
+        total_rows = len(result)
+        logger.info(f"Processing {total_rows:,} rows...")
+
+        # Process each row
+        for row_idx, row in enumerate(result):
+            if row_idx % 10000 == 0 and row_idx > 0:
+                logger.debug(f"Processed {row_idx:,} rows...")
+
+            node = root
+
+            # Process each attribute value in the row
+            for attr_idx, value in enumerate(row):
+                is_last = attr_idx == len(row) - 1
+
+                # Get or create cell for this value
+                cell = node.get_or_create_cell(value, is_leaf=is_last)
+
+                if is_last:
+                    # Leaf cell - increment count
+                    cell.count += 1
+                    if cell.count > 1:
+                        # Found duplicate entity - no keys exist
+                        logger.error(f"Duplicate entity found at row {row_idx + 1}")
+                        return None
+                    cell.sum_counts = cell.count
+                else:
+                    # Non-leaf cell - create child if needed
+                    if cell.child is None:
+                        cell.child = PrefixTreeNode(attr_idx + 1)
+                        cell.child.is_leaf = is_last
+                    node = cell.child
+
+        # Update sum_counts bottom-up
+        _update_sum_counts(root)
+
+        logger.info(f"Prefix tree built successfully")
+        return root
+
+    except Exception as e:
+        logger.error(f"Error building prefix tree: {e}")
+        raise
+
+
+def _update_sum_counts(node: PrefixTreeNode):
+    """Recursively update sum_counts for all nodes."""
+    for cell in node.cells.values():
+        if cell.is_leaf:
+            cell.sum_counts = cell.count
+        else:
+            if cell.child:
+                _update_sum_counts(cell.child)
+                cell.sum_counts = cell.child.get_total_count()
+
+
+def merge_nodes(nodes: List[PrefixTreeNode], attr_no: int) -> PrefixTreeNode:
+    """
+    Merge multiple prefix tree nodes into a single node.
+
+    This implements the cube computation by merging projections.
+    """
+    if len(nodes) == 1:
+        # Single node - just return it (shared reference)
+        return nodes[0]
+
+    # Create merged node
+    merged = PrefixTreeNode(attr_no)
+    merged.is_leaf = nodes[0].is_leaf
+
+    # Collect all distinct values across nodes
+    all_values = set()
+    for node in nodes:
+        all_values.update(node.cells.keys())
+
+    # For each distinct value, merge the cells
+    for value in all_values:
+        merged_cell = merged.get_or_create_cell(value, merged.is_leaf)
+
+        if merged.is_leaf:
+            # Leaf node - sum the counts
+            for node in nodes:
+                if value in node.cells:
+                    merged_cell.count += node.cells[value].count
+            merged_cell.sum_counts = merged_cell.count
+        else:
+            # Non-leaf node - recursively merge children
+            child_nodes = []
+            for node in nodes:
+                if value in node.cells and node.cells[value].child:
+                    child_nodes.append(node.cells[value].child)
+
+            if child_nodes:
+                merged_cell.child = merge_nodes(child_nodes, attr_no + 1)
+                merged_cell.sum_counts = merged_cell.child.get_total_count()
+
+    return merged
+
+
+def find_non_keys_gordian(
+    root: PrefixTreeNode, columns: List[str], verbose: bool = False
+) -> NonKeySet:
+    """
+    Find all non-keys using the GORDIAN algorithm.
+
+    This implements the interleaved cube computation with pruning.
+    """
+    logger.info("Finding non-keys using GORDIAN algorithm...")
+
+    non_key_set = NonKeySet(len(columns))
+    cur_non_key = []  # Current attribute path being explored
+
+    def non_key_finder(node: PrefixTreeNode):
+        """Recursive function to find non-keys (Algorithm 4)."""
+        nonlocal cur_non_key
+
+        # Add current attribute to path
+        cur_non_key.append(node.attr_no)
+
+        if node.is_leaf:
+            # At leaf level - check for non-keys
+            # Check if any cell has count > 1
+            for cell in node.cells.values():
+                if cell.count > 1:
+                    non_key_set.insert(cur_non_key[:])
+                    break
+
+            # Remove current attribute
+            cur_non_key.pop()
+
+            # Check if projection without last attribute is a non-key
+            if node.has_multiple_cells() or any(
+                c.count > 1 for c in node.cells.values()
+            ):
+                if cur_non_key:  # Don't insert empty non-key
+                    non_key_set.insert(cur_non_key[:])
+        else:
+            # Non-leaf node
+
+            # Singleton pruning: skip if only one entity
+            if node.get_total_count() == 1:
+                cur_non_key.pop()
+                return
+
+            # Traverse all children (depth-first)
+            for cell in node.cells.values():
+                if cell.child and not cell.child.visited:
+                    # Mark as visited for singleton pruning
+                    cell.child.visited = True
+                    non_key_finder(cell.child)
+
+            # Remove current attribute
+            cur_non_key.pop()
+
+            # Merge children and continue exploration
+            if node.has_multiple_cells():
+                # Futility pruning: check if this search is futile
+                if non_key_set.is_futile(cur_non_key[:]):
+                    if verbose:
+                        logger.debug(f"Futility pruning at {cur_non_key}")
+                    return
+
+                # Merge all children
+                child_nodes = [
+                    cell.child for cell in node.cells.values() if cell.child is not None
+                ]
+
+                if child_nodes:
+                    merged = merge_nodes(child_nodes, node.attr_no + 1)
+                    non_key_finder(merged)
+
+    # Start the recursive search
+    non_key_finder(root)
+
+    non_keys = non_key_set.get_non_keys()
+    logger.info(f"Found {len(non_keys)} non-redundant non-keys")
+
+    if verbose:
+        for nk in non_keys:
+            nk_names = [columns[i] for i in nk]
+            logger.info(f"  Non-key: {nk_names}")
+
+    return non_key_set
+
+
+def convert_non_keys_to_keys(
+    non_key_set: NonKeySet, columns: List[str]
+) -> List[Tuple[str, ...]]:
+    """
+    Convert non-keys to minimal keys (Algorithm 6).
+
+    Computes the cartesian product of complement sets.
+    """
+    non_keys = non_key_set.get_non_keys()
+
+    if not non_keys:
+        # No non-keys means all attributes together form a key
+        return [tuple(columns)]
+
+    logger.info(f"Converting {len(non_keys)} non-keys to keys...")
+
+    # Start with empty key set
+    key_set = []
+
+    for nk_indices in non_keys:
+        # Compute complement: attributes NOT in this non-key
+        complement = []
+        for i, col in enumerate(columns):
+            if i not in nk_indices:
+                complement.append((i,))  # Single-attribute key candidate
+
+        if not complement:
+            # Non-key covers all attributes - no keys possible
+            logger.warning("Non-key covers all attributes - no keys exist")
+            return []
+
+        if not key_set:
+            # First non-key - initialize key set with complement
+            key_set = complement
+        else:
+            # Compute cartesian product with existing keys
+            new_key_set = []
+            for partial_key in complement:
+                for existing_key in key_set:
+                    # Union of partial key and existing key
+                    combined = tuple(sorted(set(existing_key) | set(partial_key)))
+                    new_key_set.append(combined)
+
+            # Remove redundant keys (supersets)
+            key_set = _remove_redundant_keys(new_key_set)
+
+    # Convert indices to column names
+    result = []
+    for key_indices in key_set:
+        key_names = tuple(columns[i] for i in key_indices)
+        result.append(key_names)
+
+    logger.info(f"Found {len(result)} minimal key(s)")
+    return result
+
+
+def _remove_redundant_keys(keys: List[Tuple[int, ...]]) -> List[Tuple[int, ...]]:
+    """Remove redundant keys (keys that are supersets of other keys)."""
+    minimal_keys = []
+
+    for key in keys:
+        key_set = set(key)
+        is_minimal = True
+
+        # Check if this key is a superset of any existing minimal key
+        for minimal_key in minimal_keys:
+            if set(minimal_key).issubset(key_set) and set(minimal_key) != key_set:
+                is_minimal = False
+                break
+
+        if is_minimal:
+            # Remove any existing keys that are supersets of this key
+            minimal_keys = [
+                mk
+                for mk in minimal_keys
+                if not key_set.issubset(set(mk)) or key_set == set(mk)
+            ]
+            minimal_keys.append(key)
+
+    return minimal_keys
+
+
+def find_keys_gordian(
+    connector, table_name: str, columns: List[str], verbose: bool = False
+) -> List[Tuple[str, ...]]:
+    """
+    Find all minimal composite keys using the GORDIAN algorithm.
+
+    This is the main entry point for the GORDIAN algorithm.
+    """
+    logger.info(f"Running GORDIAN algorithm on {table_name}")
+    logger.info(f"Analyzing {len(columns)} columns")
+
+    # Step 1: Build prefix tree
+    prefix_tree = build_prefix_tree(connector, table_name, columns)
+
+    if prefix_tree is None:
+        logger.warning(
+            "Duplicate entities found, creating deduplicated table for GORDIAN analysis"
+        )
+
+        # Create a temporary deduplicated table
+        dedup_table_name = f"temp_dedup_{table_name.replace('.', '_')}"
+        try:
+            col_list = ", ".join(columns)
+            dedup_query = f"""
+                CREATE OR REPLACE TABLE {dedup_table_name} AS
+                SELECT {col_list}
+                FROM {table_name}
+                GROUP BY {col_list}
+            """
+            connector.run_query(dedup_query)
+            logger.info(f"Created temporary deduplicated table: {dedup_table_name}")
+
+            # Try building prefix tree again on deduplicated data
+            prefix_tree = build_prefix_tree(connector, dedup_table_name, columns)
+
+            # Clean up temporary table
+            try:
+                connector.run_query(f"DROP TABLE IF EXISTS {dedup_table_name}")
+                logger.debug(f"Dropped temporary table: {dedup_table_name}")
+            except Exception as cleanup_error:
+                logger.warning(
+                    f"Failed to drop temporary table {dedup_table_name}: {cleanup_error}"
+                )
+
+            if prefix_tree is None:
+                logger.error("No keys exist even after deduplication")
+                return []
+
+        except Exception as e:
+            logger.error(f"Failed to create deduplicated table: {e}")
+            return []
+
+    # Step 2: Find non-keys using interleaved cube computation
+    non_key_set = find_non_keys_gordian(prefix_tree, columns, verbose)
+
+    # Step 3: Convert non-keys to keys
+    keys = convert_non_keys_to_keys(non_key_set, columns)
+
+    return keys
+
+
+# ============================================================================
+# Original brute-force implementation (kept for compatibility)
+# ============================================================================
 
 
 def get_column_names(connector, table_name: str) -> List[str]:
@@ -29,57 +480,132 @@ def get_row_count(connector, table_name: str) -> int:
         raise
 
 
+def get_attribute_cardinalities(
+    connector, table_name: str, columns: List[str]
+) -> Dict[str, int]:
+    """Get cardinality (distinct count) for each attribute, sorted descending"""
+    cardinalities = {}
+
+    for col in columns:
+        try:
+            query = f"SELECT COUNT(DISTINCT {col}) as card FROM {table_name}"
+            result = connector.run_query(query)
+            cardinalities[col] = result[0][0] if result else 0
+        except Exception as e:
+            logger.warning(f"Failed to get cardinality for {col}: {e}")
+            cardinalities[col] = 0
+
+    return cardinalities
+
+
+def check_for_nulls(connector, table_name: str, columns: List[str]) -> Set[str]:
+    """Check which columns contain NULL values"""
+    columns_with_nulls = set()
+
+    for col in columns:
+        try:
+            query = f"SELECT COUNT(*) FROM {table_name} WHERE {col} IS NULL"
+            result = connector.run_query(query)
+            null_count = result[0][0] if result else 0
+            if null_count > 0:
+                columns_with_nulls.add(col)
+                logger.debug(f"Column {col} contains {null_count} NULL values")
+        except Exception as e:
+            logger.warning(f"Failed to check NULLs for {col}: {e}")
+
+    return columns_with_nulls
+
+
 def check_key_candidate(
     connector, table_name: str, columns: Tuple[str, ...], total_rows: int
 ) -> bool:
-    """Check if column combination is a valid key"""
+    """Check if a combination of columns forms a valid key (all values are unique)"""
     col_list = ", ".join(columns)
-
-    # First check if any of the key columns contain NULLs
-    null_conditions = " OR ".join([f"{col} IS NULL" for col in columns])
-    null_check_query = f"""
-        SELECT COUNT(*) as null_count
-        FROM {table_name}
-        WHERE {null_conditions}
+    query = f"""
+        SELECT COUNT(*) as distinct_count
+        FROM (
+            SELECT {col_list}
+            FROM {table_name}
+            GROUP BY {col_list}
+        ) subquery
     """
 
     try:
-        null_result = connector.run_query(null_check_query)
-        null_count = null_result[0][0] if null_result else 0
-
-        # If there are NULLs in any key column, it's not a valid key
-        if null_count > 0:
-            logger.debug(
-                f"Columns {columns} contain {null_count} NULL values, not a valid key"
-            )
-            return False
-
-        # Use a subquery with GROUP BY to count distinct combinations
-        query = f"""
-            SELECT COUNT(*) as distinct_count
-            FROM (
-                SELECT {col_list}
-                FROM {table_name}
-                GROUP BY {col_list}
-            ) subquery
-        """
-
         result = connector.run_query(query)
         distinct_count = result[0][0] if result else 0
-
-        # Valid key if distinct count equals total rows
-        is_valid = distinct_count == total_rows
-
-        if not is_valid:
-            logger.debug(
-                f"Columns {columns}: {distinct_count:,} distinct vs {total_rows:,} total rows"
-            )
-
-        return is_valid
-
+        return distinct_count == total_rows
     except Exception as e:
-        logger.error(f"Error checking key candidate {columns}: {str(e)}")
-        raise
+        logger.error(f"Error checking key candidate {columns}: {e}")
+        return False
+
+
+def find_minimal_keys(
+    connector,
+    table_name: str,
+    columns: List[str],
+    total_rows: int,
+    max_key_size: int = None,
+    verbose: bool = False,
+) -> List[Tuple[str, ...]]:
+    """
+    Find all minimal keys by checking combinations in order of size.
+    A minimal key is a key where no proper subset is also a key.
+    """
+    if max_key_size is None:
+        max_key_size = len(columns)
+
+    # Sort columns by cardinality (descending) for better performance
+    cardinalities = get_attribute_cardinalities(connector, table_name, columns)
+    sorted_columns = sorted(columns, key=lambda x: cardinalities[x], reverse=True)
+
+    logger.info(
+        f"Attribute cardinalities: {dict(sorted((k, v) for k, v in cardinalities.items()))}"
+    )
+
+    # Check for NULL values - any attribute with NULLs cannot be part of a key
+    attrs_with_nulls = check_for_nulls(connector, table_name, sorted_columns)
+    if attrs_with_nulls:
+        logger.info(f"Attributes with NULLs (excluded from keys): {attrs_with_nulls}")
+        sorted_columns = [a for a in sorted_columns if a not in attrs_with_nulls]
+        if not sorted_columns:
+            logger.warning("All attributes contain NULLs, no keys possible")
+            return []
+
+    minimal_keys = []
+    checked_combinations = 0
+
+    # Check combinations of increasing size
+    for size in range(1, min(max_key_size, len(sorted_columns)) + 1):
+        if verbose:
+            logger.info(f"Checking attribute combinations of size {size}...")
+
+        size_keys = []
+
+        for combo in combinations(sorted_columns, size):
+            # Skip if this is a superset of an already found minimal key
+            is_superset_of_key = any(
+                set(key).issubset(set(combo)) for key in minimal_keys
+            )
+            if is_superset_of_key:
+                continue
+
+            checked_combinations += 1
+
+            # Check if this combination is a key
+            if check_key_candidate(connector, table_name, combo, total_rows):
+                logger.info(f"Key found: {combo}")
+                size_keys.append(combo)
+
+        # Add all keys found at this size level
+        minimal_keys.extend(size_keys)
+
+        # If we found keys at this size, don't check larger sizes
+        # (they wouldn't be minimal)
+        if minimal_keys:
+            break
+
+    logger.info(f"Checked {checked_combinations} combinations")
+    return minimal_keys
 
 
 def calculate_total_combinations(n_columns: int, max_size: int = None) -> int:
@@ -114,10 +640,18 @@ def find_composite_keys(
     columns: List[str],
     max_key_size: int = None,
     verbose: bool = False,
-    is_temp_table: bool = False,
+    use_gordian: bool = True,
 ) -> List[Tuple[str, ...]]:
-    """Find all minimal composite keys"""
+    """
+    Find all minimal composite keys.
 
+    Uses GORDIAN algorithm by default for better performance on large datasets.
+    Falls back to brute-force for small datasets or when GORDIAN is disabled.
+
+    This checks combinations of columns in order of size, stopping when
+    minimal keys are found. A minimal key is one where no proper subset
+    is also a key.
+    """
     total_rows = get_row_count(connector, table_name)
 
     if not total_rows or total_rows == 0:
@@ -130,58 +664,51 @@ def find_composite_keys(
     if max_key_size is None:
         max_key_size = len(columns)
 
-    id_count = sum(1 for col in columns if is_id_column(col))
-    if id_count > 0:
-        logger.info(f"Found {id_count} ID-like column(s), checking those first")
+    # Limit columns for analysis if needed
+    analysis_columns = (
+        columns[:max_key_size] if len(columns) > max_key_size else columns
+    )
 
-    found_keys = []
-    checked_combinations = 0
-    excluded_supersets = set()
+    # Decide which algorithm to use
+    total_combinations = calculate_total_combinations(
+        len(analysis_columns), max_key_size
+    )
 
-    # Check combinations by size (starting from 1)
-    for size in range(1, min(max_key_size + 1, len(columns) + 1)):
-        logger.info(f"Checking combinations of size {size}...")
+    # Use GORDIAN for larger search spaces (>1000 combinations)
+    if use_gordian and total_combinations > 1000:
+        logger.info(f"Using GORDIAN algorithm ({total_combinations:,} combinations)")
+        try:
+            minimal_keys = find_keys_gordian(
+                connector, table_name, analysis_columns, verbose
+            )
+        except Exception as e:
+            logger.warning(
+                f"GORDIAN algorithm failed: {e}, falling back to brute-force"
+            )
+            minimal_keys = find_minimal_keys(
+                connector,
+                table_name,
+                analysis_columns,
+                total_rows,
+                max_key_size,
+                verbose,
+            )
+    else:
+        logger.info(
+            f"Using brute-force algorithm ({total_combinations:,} combinations)"
+        )
+        minimal_keys = find_minimal_keys(
+            connector, table_name, analysis_columns, total_rows, max_key_size, verbose
+        )
 
-        # Generate combinations using prioritized column order
-        size_combinations = list(combinations(columns, size))
-        logger.info(f"Total combinations: {len(size_combinations):,}")
+    if minimal_keys:
+        logger.info(f"Found {len(minimal_keys)} minimal key(s)")
+        for key in minimal_keys:
+            logger.info(f"  Key: {', '.join(key)}")
+    else:
+        logger.warning("No minimal keys found")
 
-        for i, col_combo in enumerate(size_combinations, 1):
-            # Skip if this is a superset of an already found key
-            if any(set(key).issubset(set(col_combo)) for key in found_keys):
-                continue
-
-            # Skip if superset of excluded combination
-            if any(
-                excluded.issubset(set(col_combo)) for excluded in excluded_supersets
-            ):
-                continue
-
-            checked_combinations += 1
-
-            if verbose and i % 100 == 0:
-                logger.info(f"Progress: {i}/{len(size_combinations)}")
-
-            try:
-                is_key = check_key_candidate(
-                    connector, table_name, col_combo, total_rows
-                )
-
-                if is_key:
-                    found_keys.append(col_combo)
-                    logger.info(f"Found key: {', '.join(col_combo)}")
-
-            except Exception as e:
-                logger.error(f"Error checking {col_combo}: {e}")
-
-        # If we found keys of this size, don't check larger sizes
-        # (we only want minimal keys)
-        if found_keys:
-            logger.info(f"Found minimal keys of size {size}, stopping search")
-            break
-
-    logger.info(f"Total combinations checked: {checked_combinations:,}")
-    return found_keys
+    return minimal_keys
 
 
 def find_keys_for_table(
@@ -194,16 +721,18 @@ def find_keys_for_table(
     force: bool = False,
     verbose: bool = False,
     sample_size: int = None,
+    use_gordian: bool = True,
 ) -> Tuple[str, Tuple[Optional[str], Optional[str], Optional[str], bool]]:
     """Find composite keys for a single table and return formatted result
 
     Returns:
-        Tuple of (table_name, (primary_key, error, dedup_table, dedup_needed))
+        Tuple of (original_table_name, (primary_key, error, dedup_table, dedup_needed))
         where dedup_needed is True if deduplication was required
     """
+    # Track the original table name to return in results
+    original_table_name = table_name
     # Track if we created a sample table that needs cleanup
     sample_table_name = None
-    original_table_name = table_name
 
     try:
         # Create sample table if sample_size is specified
@@ -225,10 +754,15 @@ def find_keys_for_table(
                 # Check if sample table has any rows
                 sample_row_count = connector.count_rows(sample_table_name)
                 if sample_row_count == 0:
-                    logger.warning(f"Sample table is empty for {table_name}")
+                    logger.warning(f"Sample table is empty for {original_table_name}")
                     # Clean up empty sample table
                     connector.run_query(f"DROP TABLE IF EXISTS {sample_table_name}")
-                    return table_name, (None, "Source table is empty", None, False)
+                    return original_table_name, (
+                        None,
+                        "Source table is empty",
+                        None,
+                        False,
+                    )
 
                 logger.info(f"Sample table created with {sample_row_count:,} rows")
                 # Use the sample table for analysis
@@ -247,8 +781,8 @@ def find_keys_for_table(
         all_columns = get_column_names(connector, table_name)
 
         if not all_columns:
-            logger.error(f"No columns found for table {table_name}")
-            return table_name, (None, f"No columns found", None, False)
+            logger.error(f"No columns found for table {original_table_name}")
+            return original_table_name, (None, f"No columns found", None, False)
 
         # Start with all columns for key finding
         columns = all_columns.copy()
@@ -261,8 +795,10 @@ def find_keys_for_table(
             columns = [col for col in columns if col not in exclude_columns]
 
         if not columns:
-            logger.error(f"No columns remaining after filters for {table_name}")
-            return table_name, (None, "No columns after filters", None, False)
+            logger.error(
+                f"No columns remaining after filters for {original_table_name}"
+            )
+            return original_table_name, (None, "No columns after filters", None, False)
         # Prioritize ID columns
         columns = prioritize_id_columns(columns)
         # Check if number of columns exceeds limit for key finding
@@ -276,42 +812,43 @@ def find_keys_for_table(
         total_combinations = calculate_total_combinations(len(columns), max_key_size)
 
         logger.info(
-            f"Table {table_name}: {len(columns)} columns, {total_combinations:,} combinations"
+            f"Table {original_table_name}: {len(columns)} columns, {total_combinations:,} combinations"
         )
 
-        # Warn if too many combinations
-        if total_combinations > 50000 and not force:
-            error_msg = f"Too many combinations ({total_combinations:,}), use --force"
-            logger.error(f"{table_name}: {error_msg}")
-            return table_name, (None, error_msg, None, False)
+        # Warn if too many combinations (only for brute-force algorithm)
+        # GORDIAN can handle large search spaces efficiently
+        if total_combinations > 50000 and not force and not use_gordian:
+            error_msg = f"Too many combinations ({total_combinations:,}), use --force or enable GORDIAN algorithm"
+            logger.error(f"{original_table_name}: {error_msg}")
+            return original_table_name, (None, error_msg, None, False)
 
         # Find keys
         keys = find_composite_keys(
-            connector, table_name, columns, max_key_size, verbose
+            connector, table_name, columns, max_key_size, verbose, use_gordian
         )
 
         # Check if table was empty (find_composite_keys returns empty list)
         total_rows = get_row_count(connector, table_name)
         if total_rows == 0:
-            logger.warning(f"Table {table_name} is empty")
-            return table_name, (None, "Table is empty", None, False)
+            logger.warning(f"Table {original_table_name} is empty")
+            return original_table_name, (None, "Table is empty", None, False)
 
         if keys:
             # Use the first (minimal) key found
             primary_key = keys[0]
             # Format as comma-separated list
             formatted_key = ", ".join(primary_key)
-            logger.info(f"Found key for {table_name}: {formatted_key}")
-            return table_name, (formatted_key, None, None, False)
+            logger.info(f"Found key for {original_table_name}: {formatted_key}")
+            return original_table_name, (formatted_key, None, None, False)
         else:
-            logger.warning(f"No composite keys found for {table_name}")
+            logger.warning(f"No composite keys found for {original_table_name}")
 
             # Try with deduplicated table
             logger.info(
-                f"Attempting to find key on deduplicated version of {table_name}"
+                f"Attempting to find key on deduplicated version of {original_table_name}"
             )
             # Sanitize table name for dedup table (handle None and special characters)
-            dedup_table_name = f"dedup_{table_name.replace('.', '_')}"
+            dedup_table_name = f"dedup_{original_table_name.replace('.', '_')}"
             try:
                 # Create deduplicated table using ALL columns, not just the limited set for key finding
                 all_col_list = ", ".join(all_columns)
@@ -331,7 +868,9 @@ def find_keys_for_table(
                     logger.info(f"Deduplicated table has {dedup_row_count:,} rows")
 
                     if dedup_row_count == 0:
-                        logger.warning(f"Deduplicated table is empty for {table_name}")
+                        logger.warning(
+                            f"Deduplicated table is empty for {original_table_name}"
+                        )
                         # Drop the empty dedup table
                         try:
                             connector.run_query(
@@ -341,52 +880,22 @@ def find_keys_for_table(
                             logger.warning(
                                 f"Failed to drop empty dedup table {dedup_table_name}: {cleanup_error}"
                             )
-                        return table_name, (
+                        return original_table_name, (
                             None,
                             "No keys found (deduplicated table is empty)",
                             None,
                             False,
                         )
 
-                    # Now check combinations directly using the same connector
-                    dedup_keys = []
-                    checked_combinations = 0
-
-                    # Check combinations by size
-                    for size in range(
-                        1, min((max_key_size or len(columns)) + 1, len(columns) + 1)
-                    ):
-                        logger.info(
-                            f"Checking deduplicated combinations of size {size}..."
-                        )
-
-                        size_combinations = list(combinations(columns, size))
-
-                        for col_combo in size_combinations:
-                            checked_combinations += 1
-
-                            try:
-                                is_key = check_key_candidate(
-                                    connector,
-                                    dedup_table_name,
-                                    col_combo,
-                                    dedup_row_count,
-                                )
-
-                                if is_key:
-                                    dedup_keys.append(col_combo)
-                                    logger.info(
-                                        f"Found key in deduplicated table: {', '.join(col_combo)}"
-                                    )
-                                    break
-
-                            except Exception as e:
-                                logger.error(
-                                    f"Error checking {col_combo} on dedup table: {e}"
-                                )
-
-                        if dedup_keys:
-                            break
+                    # Now check for keys on deduplicated table
+                    dedup_keys = find_composite_keys(
+                        connector,
+                        dedup_table_name,
+                        columns,
+                        max_key_size,
+                        verbose,
+                        use_gordian,
+                    )
 
                 except Exception as count_error:
                     logger.error(
@@ -399,7 +908,7 @@ def find_keys_for_table(
                         logger.warning(
                             f"Failed to drop dedup table {dedup_table_name}: {cleanup_error}"
                         )
-                    return table_name, (
+                    return original_table_name, (
                         None,
                         f"No keys found (dedup table error: {str(count_error)})",
                         None,
@@ -411,9 +920,14 @@ def find_keys_for_table(
                     primary_key = dedup_keys[0]
                     formatted_key = ", ".join(primary_key)
                     note = f"Primary key found: {formatted_key}, but table has duplicate records - using deduplicated table"
-                    logger.warning(f"{table_name}: {note}")
+                    logger.warning(f"{original_table_name}: {note}")
                     # Return the dedup table name and flag that dedup was needed
-                    return table_name, (formatted_key, note, dedup_table_name, True)
+                    return original_table_name, (
+                        formatted_key,
+                        note,
+                        dedup_table_name,
+                        True,
+                    )
                 else:
                     # No key found even after dedup - clean up the dedup table
                     try:
@@ -424,9 +938,9 @@ def find_keys_for_table(
                         )
 
                     logger.warning(
-                        f"No keys found even after deduplication for {table_name}"
+                        f"No keys found even after deduplication for {original_table_name}"
                     )
-                    return table_name, (
+                    return original_table_name, (
                         None,
                         "No keys found (even after deduplication)",
                         None,
@@ -435,9 +949,9 @@ def find_keys_for_table(
 
             except Exception as dedup_error:
                 logger.error(
-                    f"Error during deduplication attempt for {table_name}: {dedup_error}"
+                    f"Error during deduplication attempt for {original_table_name}: {dedup_error}"
                 )
-                return table_name, (
+                return original_table_name, (
                     None,
                     f"No keys found (deduplication failed: {str(dedup_error)})",
                     None,
@@ -536,8 +1050,14 @@ def keyfinder(
     force: bool = False,
     verbose: bool = False,
     sample_size: int = None,
+    use_gordian: bool = True,
 ):
-    """Find composite keys in database table(s)"""
+    """
+    Find composite keys in database table(s).
+
+    Checks combinations of columns in order of size to find minimal keys.
+    Uses cardinality-based ordering and NULL checking for better performance.
+    """
 
     with Timer("Composite key search"):
         # Load config
@@ -559,6 +1079,7 @@ def keyfinder(
                     force,
                     verbose,
                     sample_size,
+                    use_gordian,
                 )
 
                 logger.info("=" * 60)
@@ -586,7 +1107,10 @@ def keyfinder(
 
             if not tables_file:
                 logger.error(
-                    "tables_file must be provided via --tables-file argument or in config YAML"
+                    "ERROR: No table specified. You must provide either:\n"
+                    "  1. --table <table_name> for a single table, OR\n"
+                    "  2. --tables-file <csv_file> for multiple tables, OR\n"
+                    "  3. 'tables_file' in your config YAML"
                 )
                 return
 
@@ -665,6 +1189,7 @@ def keyfinder(
                         force,
                         verbose,
                         sample_size,
+                        use_gordian,
                     )
                     results[table_name] = result
 
@@ -902,8 +1427,11 @@ def main(args=None):
         description="Find composite keys in a database table",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+Finds minimal composite keys by checking combinations of columns in order of size.
+Uses cardinality-based ordering and NULL checking for better performance.
+
 Examples:
-  %(prog)s --config config.yaml --table users
+  %(prdog)s --config config.yaml --table users
   %(prog)s --config config.yaml --table orders --max-size 3
   %(prog)s --config config.yaml --table products --exclude id created_at
   %(prog)s --config config.yaml --table data --include-only user_id date --force
@@ -958,6 +1486,11 @@ connection:
         help="Force execution even if combination count is high",
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
+    parser.add_argument(
+        "--no-gordian",
+        action="store_true",
+        help="Disable GORDIAN algorithm and use brute-force approach",
+    )
 
     if args is None:
         args = parser.parse_args()
@@ -970,6 +1503,20 @@ connection:
     if args.table and args.tables_file:
         parser.error("Cannot specify both --table and --tables-file")
 
+    # Check if at least one table source is provided (table or tables_file)
+    # tables_file can also come from config, so we check that in keyfinder()
+    if not args.table and not args.tables_file:
+        # Load config to check if tables_file is there
+        try:
+            config = load_config(args.config)
+            if not config.get("tables_file"):
+                parser.error(
+                    "You must specify either --table <table_name> or --tables-file <csv_file>\n"
+                    "(or include 'tables_file' in your config YAML)"
+                )
+        except Exception as e:
+            parser.error(f"Error loading config: {e}")
+
     keyfinder(
         config_path=args.config,
         table_name=args.table,
@@ -981,6 +1528,7 @@ connection:
         force=args.force,
         verbose=args.verbose,
         sample_size=args.sample_size,
+        use_gordian=not args.no_gordian,
     )
 
 
