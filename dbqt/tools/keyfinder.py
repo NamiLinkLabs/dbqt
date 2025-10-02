@@ -1,9 +1,11 @@
+import argparse
 import logging
+import polars as pl
 from itertools import combinations
-from typing import List, Tuple, Set
-from datetime import datetime
+from typing import List, Tuple, Optional
 from dbqt.tools.utils import load_config, setup_logging, Timer
 from dbqt.connections import create_connector
+from math import comb
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +33,10 @@ def check_key_candidate(
     connector, table_name: str, columns: Tuple[str, ...], total_rows: int
 ) -> bool:
     """Check if column combination is a valid key"""
-    col_list = ", ".join([f'"{col}"' for col in columns])
+    col_list = ", ".join(columns)
 
     # First check if any of the key columns contain NULLs
-    null_conditions = " OR ".join([f'"{col}" IS NULL' for col in columns])
+    null_conditions = " OR ".join([f"{col} IS NULL" for col in columns])
     null_check_query = f"""
         SELECT COUNT(*) as null_count
         FROM {table_name}
@@ -85,8 +87,6 @@ def calculate_total_combinations(n_columns: int, max_size: int = None) -> int:
     if max_size is None or max_size >= n_columns:
         return 2**n_columns - 1
 
-    from math import comb
-
     return sum(comb(n_columns, k) for k in range(1, max_size + 1))
 
 
@@ -114,13 +114,14 @@ def find_composite_keys(
     columns: List[str],
     max_key_size: int = None,
     verbose: bool = False,
+    is_temp_table: bool = False,
 ) -> List[Tuple[str, ...]]:
     """Find all minimal composite keys"""
 
     total_rows = get_row_count(connector, table_name)
 
-    if total_rows == 0:
-        logger.warning("Table is empty")
+    if not total_rows or total_rows == 0:
+        logger.warning(f"Table {table_name} is empty")
         return []
 
     logger.info(f"Total rows: {total_rows:,}")
@@ -185,8 +186,8 @@ def find_composite_keys(
     return found_keys
 
 
-def keyfinder(
-    config_path: str,
+def find_keys_for_table(
+    connector,
     table_name: str,
     max_key_size: int = None,
     max_columns: int = 20,
@@ -194,87 +195,648 @@ def keyfinder(
     include_columns: List[str] = None,
     force: bool = False,
     verbose: bool = False,
+) -> Tuple[str, Tuple[Optional[str], Optional[str], Optional[str], bool]]:
+    """Find composite keys for a single table and return formatted result
+
+    Returns:
+        Tuple of (table_name, (primary_key, error, dedup_table, dedup_needed))
+        where dedup_needed is True if deduplication was required
+    """
+    try:
+        # Get columns
+        columns = get_column_names(connector, table_name)
+
+        if not columns:
+            logger.error(f"No columns found for table {table_name}")
+            return table_name, (None, f"No columns found", None, False)
+
+        # Filter columns
+        if include_columns:
+            columns = [col for col in columns if col in include_columns]
+
+        if exclude_columns:
+            columns = [col for col in columns if col not in exclude_columns]
+
+        if not columns:
+            logger.error(f"No columns remaining after filters for {table_name}")
+            return table_name, (None, "No columns after filters", None, False)
+
+        # Check if number of columns exceeds limit
+        if len(columns) > max_columns:
+            logger.warning(
+                f"Table {table_name} has {len(columns)} columns, limiting to first {max_columns}"
+            )
+            columns = columns[:max_columns]
+
+        # Calculate combinations
+        total_combinations = calculate_total_combinations(len(columns), max_key_size)
+
+        logger.info(
+            f"Table {table_name}: {len(columns)} columns, {total_combinations:,} combinations"
+        )
+
+        # Warn if too many combinations
+        if total_combinations > 50000 and not force:
+            error_msg = f"Too many combinations ({total_combinations:,}), use --force"
+            logger.error(f"{table_name}: {error_msg}")
+            return table_name, (None, error_msg, None, False)
+
+        # Find keys
+        keys = find_composite_keys(
+            connector, table_name, columns, max_key_size, verbose
+        )
+
+        # Check if table was empty (find_composite_keys returns empty list)
+        total_rows = get_row_count(connector, table_name)
+        if total_rows == 0:
+            logger.warning(f"Table {table_name} is empty")
+            return table_name, (None, "Table is empty", None, False)
+
+        if keys:
+            # Use the first (minimal) key found
+            primary_key = keys[0]
+            # Format as comma-separated list
+            formatted_key = ", ".join(primary_key)
+            logger.info(f"Found key for {table_name}: {formatted_key}")
+            return table_name, (formatted_key, None, None, False)
+        else:
+            logger.warning(f"No composite keys found for {table_name}")
+
+            # Try with deduplicated table
+            logger.info(
+                f"Attempting to find key on deduplicated version of {table_name}"
+            )
+            # Sanitize table name for dedup table (handle None and special characters)
+            dedup_table_name = f"dedup_{table_name.replace('.', '_')}"
+            try:
+                # Create deduplicated table and find keys in a single connection context
+                col_list = ", ".join(columns)
+                dedup_query = f"""
+                    CREATE OR REPLACE TABLE {dedup_table_name} AS
+                    SELECT {col_list}
+                    FROM {table_name}
+                    GROUP BY {col_list}
+                """
+
+                logger.info(f"Creating deduplicated table: {dedup_table_name}")
+                connector.run_query(dedup_query)
+
+                # Get row count for the dedup table
+                try:
+                    dedup_row_count = connector.count_rows(dedup_table_name)
+                    logger.info(f"Deduplicated table has {dedup_row_count:,} rows")
+
+                    if dedup_row_count == 0:
+                        logger.warning(f"Deduplicated table is empty for {table_name}")
+                        # Drop the empty dedup table
+                        try:
+                            connector.run_query(
+                                f"DROP TABLE IF EXISTS {dedup_table_name}"
+                            )
+                        except Exception as cleanup_error:
+                            logger.warning(
+                                f"Failed to drop empty dedup table {dedup_table_name}: {cleanup_error}"
+                            )
+                        return table_name, (
+                            None,
+                            "No keys found (deduplicated table is empty)",
+                            None,
+                            False,
+                        )
+
+                    # Now check combinations directly using the same connector
+                    dedup_keys = []
+                    checked_combinations = 0
+
+                    # Prioritize ID columns
+                    prioritized_columns = prioritize_id_columns(columns)
+
+                    # Check combinations by size
+                    for size in range(
+                        1, min((max_key_size or len(columns)) + 1, len(columns) + 1)
+                    ):
+                        logger.info(
+                            f"Checking deduplicated combinations of size {size}..."
+                        )
+
+                        size_combinations = list(
+                            combinations(prioritized_columns, size)
+                        )
+
+                        for col_combo in size_combinations:
+                            checked_combinations += 1
+
+                            try:
+                                is_key = check_key_candidate(
+                                    connector,
+                                    dedup_table_name,
+                                    col_combo,
+                                    dedup_row_count,
+                                )
+
+                                if is_key:
+                                    dedup_keys.append(col_combo)
+                                    logger.info(
+                                        f"Found key in deduplicated table: {', '.join(col_combo)}"
+                                    )
+                                    break
+
+                            except Exception as e:
+                                logger.error(
+                                    f"Error checking {col_combo} on dedup table: {e}"
+                                )
+
+                        if dedup_keys:
+                            break
+
+                except Exception as count_error:
+                    logger.error(
+                        f"Error getting row count for dedup table: {count_error}"
+                    )
+                    # Drop the dedup table on error
+                    try:
+                        connector.run_query(f"DROP TABLE IF EXISTS {dedup_table_name}")
+                    except Exception as cleanup_error:
+                        logger.warning(
+                            f"Failed to drop dedup table {dedup_table_name}: {cleanup_error}"
+                        )
+                    return table_name, (
+                        None,
+                        f"No keys found (dedup table error: {str(count_error)})",
+                        None,
+                        False,
+                    )
+
+                if dedup_keys:
+                    # Found a key in deduplicated version - keep the materialized table
+                    primary_key = dedup_keys[0]
+                    formatted_key = ", ".join(primary_key)
+                    note = f"Primary key found: {formatted_key}, but table has duplicate records - using deduplicated table"
+                    logger.warning(f"{table_name}: {note}")
+                    # Return the dedup table name and flag that dedup was needed
+                    return table_name, (formatted_key, note, dedup_table_name, True)
+                else:
+                    # No key found even after dedup - clean up the dedup table
+                    try:
+                        connector.run_query(f"DROP TABLE IF EXISTS {dedup_table_name}")
+                    except Exception as cleanup_error:
+                        logger.warning(
+                            f"Failed to drop dedup table {dedup_table_name}: {cleanup_error}"
+                        )
+
+                    logger.warning(
+                        f"No keys found even after deduplication for {table_name}"
+                    )
+                    return table_name, (
+                        None,
+                        "No keys found (even after deduplication)",
+                        None,
+                        False,
+                    )
+
+            except Exception as dedup_error:
+                logger.error(
+                    f"Error during deduplication attempt for {table_name}: {dedup_error}"
+                )
+                return table_name, (
+                    None,
+                    f"No keys found (deduplication failed: {str(dedup_error)})",
+                    None,
+                    False,
+                )
+
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Error processing {table_name}: {error_msg}")
+        return table_name, (None, error_msg, None, False)
+
+
+def cleanup_temp_tables(connector):
+    """Drop all temp_dedup_* tables/views from the database
+
+    Args:
+        connector: Database connector
+    """
+    try:
+        # Query to find all temp_dedup_* tables and views
+        query = """
+            SELECT table_name, table_type
+            FROM information_schema.tables 
+            WHERE table_name LIKE 'temp_dedup_%'
+        """
+
+        try:
+            result = connector.run_query(query)
+
+            if result:
+                logger.info(f"Dropping {len(result)} temp_dedup_* objects")
+                for row in result:
+                    table_name = row[0]
+                    table_type = row[1]
+                    drop_type = "VIEW" if table_type == "VIEW" else "TABLE"
+                    try:
+                        connector.run_query(f"DROP {drop_type} IF EXISTS {table_name}")
+                        logger.debug(f"Dropped {drop_type.lower()}: {table_name}")
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to drop {drop_type.lower()} {table_name}: {e}"
+                        )
+
+        except Exception as e:
+            # If information_schema query fails, try alternative approach for DuckDB
+            logger.debug(f"Standard cleanup query failed, trying alternative: {e}")
+            try:
+                # DuckDB-specific query
+                result = connector.run_query("SHOW TABLES")
+                temp_objects = (
+                    [row[0] for row in result if row[0].startswith("temp_dedup_")]
+                    if result
+                    else []
+                )
+
+                if temp_objects:
+                    logger.info(f"Dropping {len(temp_objects)} temp_dedup_* objects")
+                    for obj_name in temp_objects:
+                        # Try both TABLE and VIEW
+                        for drop_type in ["TABLE", "VIEW"]:
+                            try:
+                                connector.run_query(
+                                    f"DROP {drop_type} IF EXISTS {obj_name}"
+                                )
+                                logger.debug(f"Dropped {drop_type.lower()}: {obj_name}")
+                                break
+                            except Exception:
+                                continue
+
+            except Exception as e2:
+                logger.warning(f"Could not clean up temp objects: {e2}")
+
+    except Exception as e:
+        logger.warning(f"Error during temp object cleanup: {e}")
+
+
+def keyfinder(
+    config_path: str,
+    table_name: str = None,
+    tables_file: str = None,
+    max_key_size: int = None,
+    max_columns: int = 20,
+    exclude_columns: List[str] = None,
+    include_columns: List[str] = None,
+    force: bool = False,
+    verbose: bool = False,
 ):
-    """Find composite keys in a database table"""
+    """Find composite keys in database table(s)"""
 
     with Timer("Composite key search"):
         # Load config
         config = load_config(config_path)
 
-        # Create connector
-        connector = create_connector(config["connection"])
-        connector.connect()
+        # Single table mode
+        if table_name:
+            connector = create_connector(config["connection"])
+            connector.connect()
 
-        try:
-            # Get columns
-            columns = get_column_names(connector, table_name)
-
-            if not columns:
-                logger.error(f"No columns found for table {table_name}")
-                return
-
-            # Filter columns
-            if include_columns:
-                columns = [col for col in columns if col in include_columns]
-
-            if exclude_columns:
-                columns = [col for col in columns if col not in exclude_columns]
-
-            if not columns:
-                logger.error("No columns remaining after filters")
-                return
-
-            # Check if number of columns exceeds limit
-            if len(columns) > max_columns:
-                logger.warning(
-                    f"Table has {len(columns)} columns, limiting to first {max_columns}. "
-                    f"Use --max-columns to adjust or --include-only to specify columns"
+            try:
+                _, (primary_key, error, dedup_table, _) = find_keys_for_table(
+                    connector,
+                    table_name,
+                    max_key_size,
+                    max_columns,
+                    exclude_columns,
+                    include_columns,
+                    force,
+                    verbose,
                 )
-                columns = columns[:max_columns]
 
-            # Calculate combinations
-            total_combinations = calculate_total_combinations(
-                len(columns), max_key_size
-            )
+                logger.info("=" * 60)
+                if primary_key:
+                    logger.info(f"Primary key for {table_name}: {primary_key}")
+                    if dedup_table:
+                        logger.info(f"Using deduplicated table: {dedup_table}")
+                        logger.info(
+                            f"Note: Deduplicated table has been materialized for use in comparisons"
+                        )
+                else:
+                    logger.info(f"No key found for {table_name}: {error}")
+                logger.info("=" * 60)
 
-            logger.info("=" * 60)
-            logger.info(f"Table: {table_name}")
-            logger.info(f"Columns to analyze: {len(columns)}")
-            logger.info(f"Total possible combinations: {total_combinations:,}")
-            logger.info("=" * 60)
+            finally:
+                # Clean up any temp objects (dedup tables are kept, temp_dedup_* are removed)
+                cleanup_temp_tables(connector)
+                connector.disconnect()
 
-            # Warn if too many combinations
-            if total_combinations > 50000 and not force:
+        # Multiple tables mode
+        else:
+            # Get tables_file from argument or config
+            if not tables_file:
+                tables_file = config.get("tables_file")
+
+            if not tables_file:
                 logger.error(
-                    f"WARNING: {total_combinations:,} combinations is very high! "
-                    f"This may take a very long time. "
-                    f"Consider using --max-size or --include-only to reduce search space. "
-                    f"Use --force to proceed anyway"
+                    "tables_file must be provided via --tables-file argument or in config YAML"
                 )
                 return
 
-            # Find keys
-            keys = find_composite_keys(
-                connector, table_name, columns, max_key_size, verbose
+            df = pl.read_csv(tables_file)
+
+            # Determine which column contains table names
+            has_source_target = (
+                "source_table" in df.columns and "target_table" in df.columns
             )
 
-            # Print results
-            logger.info("=" * 60)
+            if "table_name" in df.columns:
+                table_column = "table_name"
+                tables = df["table_name"].to_list()
+                source_tables = None
+                target_tables = None
+            elif has_source_target:
+                # Process both source and target tables
+                source_tables = df["source_table"].to_list()
+                target_tables = df["target_table"].to_list()
 
-            if keys:
-                logger.info(f"Found {len(keys)} minimal composite key(s):")
-                for i, key in enumerate(keys, 1):
-                    logger.info(f"{i}. ({', '.join(key)})")
+                # For initial processing, collect unique tables from both columns
+                tables = []
+                for source, target in zip(source_tables, target_tables):
+                    if source and str(source) != "null":
+                        tables.append(source)
+                    elif target and str(target) != "null":
+                        tables.append(target)
+                    else:
+                        tables.append(None)
+                table_column = "source_target"  # Flag for dual column mode
             else:
-                logger.info("No composite keys found")
+                logger.error(
+                    "CSV file must contain either 'table_name' or 'source_table'/'target_table' columns"
+                )
+                return
 
-        finally:
-            connector.disconnect()
+            # Get unique tables to process (for source/target mode, we'll process both)
+            if has_source_target:
+                # Collect all unique non-null tables from both columns
+                unique_tables = set()
+                for source, target in zip(source_tables, target_tables):
+                    if source and str(source) != "null":
+                        unique_tables.add(source)
+                    if target and str(target) != "null":
+                        unique_tables.add(target)
+                valid_tables = list(unique_tables)
+            else:
+                # Filter out None values
+                valid_tables = [t for t in tables if t is not None]
+
+            if not valid_tables:
+                logger.error("No valid tables found in CSV file")
+                return
+
+            logger.info(f"Processing {len(valid_tables)} tables sequentially...")
+
+            # Process tables sequentially with a single connection
+            connector = create_connector(config["connection"])
+            connector.connect()
+
+            # Clean up any existing temp objects at start
+            cleanup_temp_tables(connector)
+
+            results = {}
+
+            try:
+                for i, table in enumerate(valid_tables, 1):
+                    logger.info(f"Processing table {i}/{len(valid_tables)}: {table}")
+                    table_name, result = find_keys_for_table(
+                        connector,
+                        table,
+                        max_key_size,
+                        max_columns,
+                        exclude_columns,
+                        include_columns,
+                        force,
+                        verbose,
+                    )
+                    results[table_name] = result
+
+                # If we have source/target mode and deduplication was needed for source,
+                # create dedup table for target as well
+                if has_source_target:
+                    for source, target in zip(source_tables, target_tables):
+                        # Skip if either is None/null
+                        if (
+                            not source
+                            or str(source) == "null"
+                            or not target
+                            or str(target) == "null"
+                        ):
+                            continue
+
+                        # Check if source needed deduplication
+                        if source in results:
+                            _, _, source_dedup_table, source_dedup_needed = results[
+                                source
+                            ]
+
+                            # If source needed dedup and target hasn't been processed yet or didn't need dedup
+                            if source_dedup_needed and target in results:
+                                (
+                                    target_key,
+                                    target_error,
+                                    target_dedup_table,
+                                    target_dedup_needed,
+                                ) = results[target]
+
+                                # If target found a key but didn't need dedup, create dedup table for consistency
+                                if target_key and not target_dedup_needed:
+                                    logger.info(
+                                        f"Source table {source} needed deduplication, creating dedup table for target {target} as well"
+                                    )
+
+                                    # Get columns for target table
+                                    try:
+                                        target_columns = get_column_names(
+                                            connector, target
+                                        )
+
+                                        if target_columns:
+                                            # Create dedup table for target
+                                            target_dedup_name = (
+                                                f"dedup_{target.replace('.', '_')}"
+                                            )
+                                            col_list = ", ".join(target_columns)
+                                            dedup_query = f"""
+                                                CREATE OR REPLACE TABLE {target_dedup_name} AS
+                                                SELECT {col_list}
+                                                FROM {target}
+                                                GROUP BY {col_list}
+                                            """
+
+                                            connector.run_query(dedup_query)
+                                            logger.info(
+                                                f"Created deduplicated table: {target_dedup_name}"
+                                            )
+
+                                            # Update results with dedup table info
+                                            note = f"Primary key found: {target_key}, deduplicated for consistency with source table"
+                                            results[target] = (
+                                                target_key,
+                                                note,
+                                                target_dedup_name,
+                                                True,
+                                            )
+
+                                    except Exception as e:
+                                        logger.error(
+                                            f"Failed to create dedup table for target {target}: {e}"
+                                        )
+
+            finally:
+                # Clean up any temp objects before disconnecting (dedup_ tables are kept)
+                cleanup_temp_tables(connector)
+                connector.disconnect()
+
+            # Build results lists maintaining original order
+            if table_column == "table_name":
+                # Single table column mode
+                primary_keys = []
+                notes = []
+                dedup_tables = []
+
+                for table in tables:
+                    if table is None or table not in results:
+                        primary_keys.append(None)
+                        notes.append("No table specified")
+                        dedup_tables.append(None)
+                    else:
+                        key, error, dedup_table, _ = results[table]
+                        primary_keys.append(key)
+                        notes.append(error)
+                        dedup_tables.append(dedup_table)
+
+                # Find position of table_name column
+                table_name_idx = df.columns.index("table_name")
+                # Create new column order: everything up to and including table_name, then dedup_table, then rest
+                new_columns = (
+                    df.columns[: table_name_idx + 1]
+                    + ["dedup_table"]
+                    + [
+                        col
+                        for col in df.columns[table_name_idx + 1 :]
+                        if col not in ["dedup_table", "primary_key", "notes"]
+                    ]
+                    + ["primary_key", "notes"]
+                )
+
+                # Add the new columns
+                df = df.with_columns(
+                    pl.Series("dedup_table", dedup_tables),
+                    pl.Series("primary_key", primary_keys),
+                    pl.Series("notes", notes),
+                )
+
+            else:  # source_table/target_table case
+                source_primary_keys = []
+                source_notes = []
+                source_dedup_tables = []
+                target_primary_keys = []
+                target_notes = []
+                target_dedup_tables = []
+
+                for source, target in zip(source_tables, target_tables):
+                    # Process source
+                    if source is None or str(source) == "null" or source not in results:
+                        source_primary_keys.append(None)
+                        source_notes.append(
+                            "No table specified"
+                            if not source or str(source) == "null"
+                            else None
+                        )
+                        source_dedup_tables.append(None)
+                    else:
+                        key, error, dedup_table, _ = results[source]
+                        source_primary_keys.append(key)
+                        source_notes.append(error)
+                        source_dedup_tables.append(dedup_table)
+
+                    # Process target
+                    if target is None or str(target) == "null" or target not in results:
+                        target_primary_keys.append(None)
+                        target_notes.append(
+                            "No table specified"
+                            if not target or str(target) == "null"
+                            else None
+                        )
+                        target_dedup_tables.append(None)
+                    else:
+                        key, error, dedup_table, _ = results[target]
+                        target_primary_keys.append(key)
+                        target_notes.append(error)
+                        target_dedup_tables.append(dedup_table)
+
+                # Find positions of source and target table columns
+                source_table_idx = df.columns.index("source_table")
+                target_table_idx = df.columns.index("target_table")
+
+                # Create new column order:
+                # everything up to source_table, source_table, source_dedup_table,
+                # everything between source and target, target_table, target_dedup_table,
+                # rest of columns, then primary_key and notes
+                new_columns = (
+                    df.columns[: source_table_idx + 1]
+                    + ["source_dedup_table"]
+                    + [
+                        col
+                        for col in df.columns[
+                            source_table_idx + 1 : target_table_idx + 1
+                        ]
+                        if col
+                        not in [
+                            "source_dedup_table",
+                            "target_dedup_table",
+                            "source_primary_key",
+                            "target_primary_key",
+                            "source_notes",
+                            "target_notes",
+                        ]
+                    ]
+                    + ["target_dedup_table"]
+                    + [
+                        col
+                        for col in df.columns[target_table_idx + 1 :]
+                        if col
+                        not in [
+                            "source_dedup_table",
+                            "target_dedup_table",
+                            "source_primary_key",
+                            "target_primary_key",
+                            "source_notes",
+                            "target_notes",
+                        ]
+                    ]
+                    + [
+                        "source_primary_key",
+                        "target_primary_key",
+                        "source_notes",
+                        "target_notes",
+                    ]
+                )
+
+                # Add the new columns
+                df = df.with_columns(
+                    pl.Series("source_dedup_table", source_dedup_tables),
+                    pl.Series("target_dedup_table", target_dedup_tables),
+                    pl.Series("source_primary_key", source_primary_keys),
+                    pl.Series("target_primary_key", target_primary_keys),
+                    pl.Series("source_notes", source_notes),
+                    pl.Series("target_notes", target_notes),
+                )
+
+            # Reorder columns
+            df = df.select(new_columns)
+
+            # Write back to CSV without quotes for column names
+            df.write_csv(tables_file, quote_style="necessary")
+            logger.info(f"Updated primary keys in {tables_file}")
 
 
 def main(args=None):
-    import argparse
-
     parser = argparse.ArgumentParser(
         description="Find composite keys in a database table",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -303,7 +865,11 @@ connection:
         required=True,
         help="YAML config file containing database connection details",
     )
-    parser.add_argument("--table", required=True, help="Table name to analyze")
+    parser.add_argument("--table", help="Single table name to analyze")
+    parser.add_argument(
+        "--tables-file",
+        help="CSV file containing list of tables (with table_name or source_table/target_table columns). Can also be specified in config YAML.",
+    )
     parser.add_argument(
         "--max-size",
         type=int,
@@ -334,9 +900,14 @@ connection:
 
     setup_logging(args.verbose)
 
+    # Note: We don't validate here because tables_file can come from config YAML
+    if args.table and args.tables_file:
+        parser.error("Cannot specify both --table and --tables-file")
+
     keyfinder(
         config_path=args.config,
         table_name=args.table,
+        tables_file=args.tables_file,
         max_key_size=args.max_size,
         max_columns=args.max_columns,
         exclude_columns=args.exclude,
