@@ -715,7 +715,7 @@ def find_keys_for_table(
     connector,
     table_name: str,
     max_key_size: int = None,
-    max_columns: int = 20,
+    max_columns: int = None,
     exclude_columns: List[str] = None,
     include_columns: List[str] = None,
     force: bool = False,
@@ -1044,7 +1044,7 @@ def keyfinder(
     table_name: str = None,
     tables_file: str = None,
     max_key_size: int = None,
-    max_columns: int = 20,
+    max_columns: int = None,
     exclude_columns: List[str] = None,
     include_columns: List[str] = None,
     force: bool = False,
@@ -1467,8 +1467,8 @@ connection:
     parser.add_argument(
         "--max-columns",
         type=int,
-        default=20,
-        help="Maximum number of columns to consider (default: 20)",
+        default=1000,
+        help="Maximum number of columns to consider (default: 1000)",
     )
     parser.add_argument(
         "--sample-size",
