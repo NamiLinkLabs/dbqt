@@ -147,7 +147,7 @@ class DuckDB(DBConnector):
         import duckdb
 
         self.logger.info(f"Establishing connection to {self.conn_type}")
-        self.connection = duckdb.connect(self.duck_db_path)
+        self.connection = duckdb.connect(self.connection_details)
         self.logger.info(f"Connection established to {self.conn_type}")
 
     def retrieve_table(self, table_name):
@@ -155,9 +155,9 @@ class DuckDB(DBConnector):
 
     def run_query(self, query):
         self.logger.info(f"Running {self.conn_type} query: {query[:300]}")
-        result = self.connection.query(query).fetchall()
+        result = self.connection.query(query)
         self.logger.info("Query completed successfully")
-        return result if result else "Success"
+        return result.fetchall() if result else "Success"
 
 
 class CSV(DuckDB):
