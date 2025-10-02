@@ -195,6 +195,7 @@ def find_keys_for_table(
     include_columns: List[str] = None,
     force: bool = False,
     verbose: bool = False,
+    sample_size: int = None,
 ) -> Tuple[str, Tuple[Optional[str], Optional[str], Optional[str], bool]]:
     """Find composite keys for a single table and return formatted result
 
@@ -202,7 +203,48 @@ def find_keys_for_table(
         Tuple of (table_name, (primary_key, error, dedup_table, dedup_needed))
         where dedup_needed is True if deduplication was required
     """
+    # Track if we created a sample table that needs cleanup
+    sample_table_name = None
+    original_table_name = table_name
+
     try:
+        # Create sample table if sample_size is specified
+        if sample_size:
+            sample_table_name = f"temp_sample_{table_name.replace('.', '_')}"
+            logger.info(
+                f"Creating sample table with {sample_size:,} records: {sample_table_name}"
+            )
+
+            try:
+                sample_query = f"""
+                    CREATE OR REPLACE TABLE {sample_table_name} AS
+                    SELECT *
+                    FROM {table_name}
+                    LIMIT {sample_size}
+                """
+                connector.run_query(sample_query)
+
+                # Check if sample table has any rows
+                sample_row_count = connector.count_rows(sample_table_name)
+                if sample_row_count == 0:
+                    logger.warning(f"Sample table is empty for {table_name}")
+                    # Clean up empty sample table
+                    connector.run_query(f"DROP TABLE IF EXISTS {sample_table_name}")
+                    return table_name, (None, "Source table is empty", None, False)
+
+                logger.info(f"Sample table created with {sample_row_count:,} rows")
+                # Use the sample table for analysis
+                table_name = sample_table_name
+
+            except Exception as sample_error:
+                logger.error(f"Failed to create sample table: {sample_error}")
+                return original_table_name, (
+                    None,
+                    f"Failed to create sample table: {str(sample_error)}",
+                    None,
+                    False,
+                )
+
         # Get columns
         columns = get_column_names(connector, table_name)
 
@@ -407,8 +449,19 @@ def find_keys_for_table(
 
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error processing {table_name}: {error_msg}")
-        return table_name, (None, error_msg, None, False)
+        logger.error(f"Error processing {original_table_name}: {error_msg}")
+        return original_table_name, (None, error_msg, None, False)
+
+    finally:
+        # Clean up sample table if it was created
+        if sample_table_name:
+            try:
+                connector.run_query(f"DROP TABLE IF EXISTS {sample_table_name}")
+                logger.debug(f"Dropped sample table: {sample_table_name}")
+            except Exception as cleanup_error:
+                logger.warning(
+                    f"Failed to drop sample table {sample_table_name}: {cleanup_error}"
+                )
 
 
 def cleanup_temp_tables(connector):
@@ -485,6 +538,7 @@ def keyfinder(
     include_columns: List[str] = None,
     force: bool = False,
     verbose: bool = False,
+    sample_size: int = None,
 ):
     """Find composite keys in database table(s)"""
 
@@ -507,6 +561,7 @@ def keyfinder(
                     include_columns,
                     force,
                     verbose,
+                    sample_size,
                 )
 
                 logger.info("=" * 60)
@@ -612,6 +667,7 @@ def keyfinder(
                         include_columns,
                         force,
                         verbose,
+                        sample_size,
                     )
                     results[table_name] = result
 
@@ -889,6 +945,11 @@ connection:
         default=20,
         help="Maximum number of columns to consider (default: 20)",
     )
+    parser.add_argument(
+        "--sample-size",
+        type=int,
+        help="Create a temporary sample table with this many records for analysis (improves performance on large tables)",
+    )
     parser.add_argument("--exclude", nargs="+", help="Columns to exclude from search")
     parser.add_argument(
         "--include-only", nargs="+", help="Only include these columns in search"
@@ -922,6 +983,7 @@ connection:
         include_columns=args.include_only,
         force=args.force,
         verbose=args.verbose,
+        sample_size=args.sample_size,
     )
 
 
