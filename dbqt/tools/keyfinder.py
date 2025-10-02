@@ -94,10 +94,10 @@ def is_id_column(column_name: str) -> bool:
     """Check if column name looks like an ID column"""
     lower_name = column_name.lower()
     return (
-        lower_name.startswith("id_")
+        lower_name == "id"
         or "_id_" in lower_name
-        or lower_name.endswith("_id")
-        or lower_name == "id"
+        or lower_name.startswith("id")
+        or lower_name.endswith("id")
     )
 
 
@@ -130,8 +130,6 @@ def find_composite_keys(
     if max_key_size is None:
         max_key_size = len(columns)
 
-    # Prioritize ID columns
-    prioritized_columns = prioritize_id_columns(columns)
     id_count = sum(1 for col in columns if is_id_column(col))
     if id_count > 0:
         logger.info(f"Found {id_count} ID-like column(s), checking those first")
@@ -145,7 +143,7 @@ def find_composite_keys(
         logger.info(f"Checking combinations of size {size}...")
 
         # Generate combinations using prioritized column order
-        size_combinations = list(combinations(prioritized_columns, size))
+        size_combinations = list(combinations(columns, size))
         logger.info(f"Total combinations: {len(size_combinations):,}")
 
         for i, col_combo in enumerate(size_combinations, 1):
@@ -245,14 +243,17 @@ def find_keys_for_table(
                     False,
                 )
 
-        # Get columns
-        columns = get_column_names(connector, table_name)
+        # Get ALL columns from the table (for deduplication)
+        all_columns = get_column_names(connector, table_name)
 
-        if not columns:
+        if not all_columns:
             logger.error(f"No columns found for table {table_name}")
             return table_name, (None, f"No columns found", None, False)
 
-        # Filter columns
+        # Start with all columns for key finding
+        columns = all_columns.copy()
+
+        # Filter columns for key finding
         if include_columns:
             columns = [col for col in columns if col in include_columns]
 
@@ -262,11 +263,12 @@ def find_keys_for_table(
         if not columns:
             logger.error(f"No columns remaining after filters for {table_name}")
             return table_name, (None, "No columns after filters", None, False)
-
-        # Check if number of columns exceeds limit
+        # Prioritize ID columns
+        columns = prioritize_id_columns(columns)
+        # Check if number of columns exceeds limit for key finding
         if len(columns) > max_columns:
             logger.warning(
-                f"Table {table_name} has {len(columns)} columns, limiting to first {max_columns}"
+                f"Table {table_name} has {len(columns)} columns, limiting key search to first {max_columns}"
             )
             columns = columns[:max_columns]
 
@@ -311,13 +313,13 @@ def find_keys_for_table(
             # Sanitize table name for dedup table (handle None and special characters)
             dedup_table_name = f"dedup_{table_name.replace('.', '_')}"
             try:
-                # Create deduplicated table and find keys in a single connection context
-                col_list = ", ".join(columns)
+                # Create deduplicated table using ALL columns, not just the limited set for key finding
+                all_col_list = ", ".join(all_columns)
                 dedup_query = f"""
                     CREATE OR REPLACE TABLE {dedup_table_name} AS
-                    SELECT {col_list}
+                    SELECT {all_col_list}
                     FROM {table_name}
-                    GROUP BY {col_list}
+                    GROUP BY {all_col_list}
                 """
 
                 logger.info(f"Creating deduplicated table: {dedup_table_name}")
@@ -350,9 +352,6 @@ def find_keys_for_table(
                     dedup_keys = []
                     checked_combinations = 0
 
-                    # Prioritize ID columns
-                    prioritized_columns = prioritize_id_columns(columns)
-
                     # Check combinations by size
                     for size in range(
                         1, min((max_key_size or len(columns)) + 1, len(columns) + 1)
@@ -361,9 +360,7 @@ def find_keys_for_table(
                             f"Checking deduplicated combinations of size {size}..."
                         )
 
-                        size_combinations = list(
-                            combinations(prioritized_columns, size)
-                        )
+                        size_combinations = list(combinations(columns, size))
 
                         for col_combo in size_combinations:
                             checked_combinations += 1
@@ -705,23 +702,23 @@ def keyfinder(
                                         f"Source table {source} needed deduplication, creating dedup table for target {target} as well"
                                     )
 
-                                    # Get columns for target table
+                                    # Get ALL columns for target table (not limited by max_columns)
                                     try:
-                                        target_columns = get_column_names(
+                                        target_all_columns = get_column_names(
                                             connector, target
                                         )
 
-                                        if target_columns:
-                                            # Create dedup table for target
+                                        if target_all_columns:
+                                            # Create dedup table for target using ALL columns
                                             target_dedup_name = (
                                                 f"dedup_{target.replace('.', '_')}"
                                             )
-                                            col_list = ", ".join(target_columns)
+                                            all_col_list = ", ".join(target_all_columns)
                                             dedup_query = f"""
                                                 CREATE OR REPLACE TABLE {target_dedup_name} AS
-                                                SELECT {col_list}
+                                                SELECT {all_col_list}
                                                 FROM {target}
-                                                GROUP BY {col_list}
+                                                GROUP BY {all_col_list}
                                             """
 
                                             connector.run_query(dedup_query)
