@@ -831,6 +831,14 @@ def keyfinder(
             # Reorder columns
             df = df.select(new_columns)
 
+            # Sort the dataframe
+            if table_column == "table_name":
+                # For single table mode, sort by dedup_table and primary_key
+                df = df.sort(["dedup_table", "primary_key"], nulls_last=True)
+            else:
+                # For source/target mode, sort by source_dedup_table and primary_key
+                df = df.sort(["source_dedup_table", "primary_key"], nulls_last=True)
+
             # Write back to CSV without quotes for column names
             df.write_csv(tables_file, quote_style="necessary")
             logger.info(f"Updated primary keys in {tables_file}")
