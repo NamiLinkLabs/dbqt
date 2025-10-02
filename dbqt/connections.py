@@ -157,7 +157,7 @@ class DuckDB(DBConnector):
         self.logger.info(f"Running {self.conn_type} query: {query[:300]}")
         result = self.connection.query(query)
         self.logger.info("Query completed successfully")
-        return result.fetchall() if result else "Success"
+        return result.fetchall() if result else None
 
 
 class CSV(DuckDB):

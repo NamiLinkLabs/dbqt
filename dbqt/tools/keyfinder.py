@@ -2,8 +2,7 @@ import argparse
 import logging
 import polars as pl
 from itertools import combinations
-from typing import List, Tuple, Optional, Set, Dict, Any
-from collections import defaultdict
+from typing import List, Tuple, Optional, Set, Dict
 from dbqt.tools.utils import load_config, setup_logging, Timer
 from dbqt.connections import create_connector
 from math import comb
@@ -457,13 +456,8 @@ def find_keys_gordian(
             )
 
             # Clean up temporary table
-            try:
-                connector.run_query(f"DROP TABLE IF EXISTS {dedup_table_name}")
-                logger.debug(f"Dropped temporary table: {dedup_table_name}")
-            except Exception as cleanup_error:
-                logger.warning(
-                    f"Failed to drop temporary table {dedup_table_name}: {cleanup_error}"
-                )
+            connector.run_query(f"DROP TABLE IF EXISTS {dedup_table_name}")
+            logger.debug(f"Dropped temporary table: {dedup_table_name}")
 
             if prefix_tree is None:
                 logger.error("No keys exist even after deduplication")
@@ -737,6 +731,109 @@ def find_composite_keys(
     return minimal_keys
 
 
+def create_temp_table(
+    connector, temp_table_name: str, source_table: str, limit: int = None
+) -> Optional[int]:
+    """Create a temporary table from source table.
+
+    Args:
+        connector: Database connector
+        temp_table_name: Name for the temporary table
+        source_table: Source table to copy from
+        limit: Optional row limit
+
+    Returns:
+        Row count of created table, or None on error
+    """
+    try:
+        limit_clause = f"LIMIT {limit}" if limit else ""
+        query = f"""
+            CREATE OR REPLACE TABLE {temp_table_name} AS
+            SELECT *
+            FROM {source_table}
+            {limit_clause}
+        """
+        connector.run_query(query)
+
+        row_count = connector.count_rows(temp_table_name)
+        if row_count == 0:
+            drop_table_if_exists(connector, temp_table_name)
+            return None
+
+        return row_count
+
+    except Exception as e:
+        logger.error(f"Failed to create temporary table {temp_table_name}: {e}")
+        return None
+
+
+def create_dedup_table(
+    connector, dedup_table_name: str, source_table: str, columns: List[str]
+) -> Optional[int]:
+    """Create a deduplicated table using GROUP BY on all columns.
+
+    Args:
+        connector: Database connector
+        dedup_table_name: Name for the deduplicated table
+        source_table: Source table to deduplicate
+        columns: List of all columns to include
+
+    Returns:
+        Row count of deduplicated table, or None on error
+    """
+    try:
+        col_list = ", ".join(columns)
+        dedup_query = f"""
+            CREATE OR REPLACE TABLE {dedup_table_name} AS
+            SELECT {col_list}
+            FROM {source_table}
+            GROUP BY {col_list}
+        """
+
+        logger.info(f"Creating deduplicated table: {dedup_table_name}")
+        connector.run_query(dedup_query)
+
+        row_count = connector.count_rows(dedup_table_name)
+        if row_count == 0:
+            logger.warning(f"Deduplicated table is empty")
+            drop_table_if_exists(connector, dedup_table_name)
+            return None
+
+        logger.info(f"Deduplicated table has {row_count:,} rows")
+        return row_count
+
+    except Exception as e:
+        logger.error(f"Error creating deduplicated table: {e}")
+        drop_table_if_exists(connector, dedup_table_name)
+        return None
+
+
+def filter_columns(
+    columns: List[str],
+    include_columns: List[str] = None,
+    exclude_columns: List[str] = None,
+) -> List[str]:
+    """Filter columns based on include/exclude lists.
+
+    Args:
+        columns: List of all columns
+        include_columns: If provided, only include these columns
+        exclude_columns: If provided, exclude these columns
+
+    Returns:
+        Filtered list of columns
+    """
+    filtered = columns.copy()
+
+    if include_columns:
+        filtered = [col for col in filtered if col in include_columns]
+
+    if exclude_columns:
+        filtered = [col for col in filtered if col not in exclude_columns]
+
+    return filtered
+
+
 def find_keys_for_table(
     connector,
     table_name: str,
@@ -768,40 +865,13 @@ def find_keys_for_table(
                 f"Creating sample table with {sample_size:,} records: {sample_table_name}"
             )
 
-            try:
-                sample_query = f"""
-                    CREATE OR REPLACE TABLE {sample_table_name} AS
-                    SELECT *
-                    FROM {table_name}
-                    LIMIT {sample_size}
-                """
-                connector.run_query(sample_query)
+            sample_row_count = create_temp_table(
+                connector, sample_table_name, table_name, sample_size
+            )
 
-                # Check if sample table has any rows
-                sample_row_count = connector.count_rows(sample_table_name)
-                if sample_row_count == 0:
-                    logger.warning(f"Sample table is empty for {original_table_name}")
-                    # Clean up empty sample table
-                    connector.run_query(f"DROP TABLE IF EXISTS {sample_table_name}")
-                    return original_table_name, (
-                        None,
-                        "Source table is empty",
-                        None,
-                        False,
-                    )
-
-                logger.info(f"Sample table created with {sample_row_count:,} rows")
-                # Use the sample table for analysis
-                table_name = sample_table_name
-
-            except Exception as sample_error:
-                logger.error(f"Failed to create sample table: {sample_error}")
-                return original_table_name, (
-                    None,
-                    f"Failed to create sample table: {str(sample_error)}",
-                    None,
-                    False,
-                )
+            logger.info(f"Sample table created with {sample_row_count:,} rows")
+            # Use the sample table for analysis
+            table_name = sample_table_name
 
         # Get ALL columns from the table (for deduplication)
         all_columns = get_column_names(connector, table_name)
@@ -810,15 +880,8 @@ def find_keys_for_table(
             logger.error(f"No columns found for table {original_table_name}")
             return original_table_name, (None, f"No columns found", None, False)
 
-        # Start with all columns for key finding
-        columns = all_columns.copy()
-
         # Filter columns for key finding
-        if include_columns:
-            columns = [col for col in columns if col in include_columns]
-
-        if exclude_columns:
-            columns = [col for col in columns if col not in exclude_columns]
+        columns = filter_columns(all_columns, include_columns, exclude_columns)
 
         if not columns:
             logger.error(
@@ -873,113 +936,61 @@ def find_keys_for_table(
             logger.info(
                 f"Attempting to find key on deduplicated version of {original_table_name}"
             )
-            # Sanitize table name for dedup table (handle None and special characters)
             dedup_table_name = f"dedup_{original_table_name.replace('.', '_')}"
+
+            dedup_row_count = create_dedup_table(
+                connector, dedup_table_name, table_name, all_columns
+            )
+            if dedup_row_count is None:
+                return original_table_name, (
+                    None,
+                    "No keys found (deduplicated table is empty or failed)",
+                    None,
+                    False,
+                )
+
+            # Now check for keys on deduplicated table
             try:
-                # Create deduplicated table using ALL columns, not just the limited set for key finding
-                all_col_list = ", ".join(all_columns)
-                dedup_query = f"""
-                    CREATE OR REPLACE TABLE {dedup_table_name} AS
-                    SELECT {all_col_list}
-                    FROM {table_name}
-                    GROUP BY {all_col_list}
-                """
+                dedup_keys = find_composite_keys(
+                    connector,
+                    dedup_table_name,
+                    columns,
+                    max_key_size,
+                    verbose,
+                    use_gordian,
+                )
+            except Exception as key_error:
+                logger.error(f"Error finding keys on dedup table: {key_error}")
+                drop_table_if_exists(connector, dedup_table_name)
+                return original_table_name, (
+                    None,
+                    f"No keys found (key search error: {str(key_error)})",
+                    None,
+                    False,
+                )
 
-                logger.info(f"Creating deduplicated table: {dedup_table_name}")
-                connector.run_query(dedup_query)
-
-                # Get row count for the dedup table
-                try:
-                    dedup_row_count = connector.count_rows(dedup_table_name)
-                    logger.info(f"Deduplicated table has {dedup_row_count:,} rows")
-
-                    if dedup_row_count == 0:
-                        logger.warning(
-                            f"Deduplicated table is empty for {original_table_name}"
-                        )
-                        # Drop the empty dedup table
-                        try:
-                            connector.run_query(
-                                f"DROP TABLE IF EXISTS {dedup_table_name}"
-                            )
-                        except Exception as cleanup_error:
-                            logger.warning(
-                                f"Failed to drop empty dedup table {dedup_table_name}: {cleanup_error}"
-                            )
-                        return original_table_name, (
-                            None,
-                            "No keys found (deduplicated table is empty)",
-                            None,
-                            False,
-                        )
-
-                    # Now check for keys on deduplicated table
-                    dedup_keys = find_composite_keys(
-                        connector,
-                        dedup_table_name,
-                        columns,
-                        max_key_size,
-                        verbose,
-                        use_gordian,
-                    )
-
-                except Exception as count_error:
-                    logger.error(
-                        f"Error getting row count for dedup table: {count_error}"
-                    )
-                    # Drop the dedup table on error
-                    try:
-                        connector.run_query(f"DROP TABLE IF EXISTS {dedup_table_name}")
-                    except Exception as cleanup_error:
-                        logger.warning(
-                            f"Failed to drop dedup table {dedup_table_name}: {cleanup_error}"
-                        )
-                    return original_table_name, (
-                        None,
-                        f"No keys found (dedup table error: {str(count_error)})",
-                        None,
-                        False,
-                    )
-
-                if dedup_keys:
-                    # Found a key in deduplicated version - keep the materialized table
-                    primary_key = dedup_keys[0]
-                    formatted_key = ", ".join(primary_key)
-                    note = f"Primary key found: {formatted_key}, but table has duplicate records - using deduplicated table"
-                    logger.warning(f"{original_table_name}: {note}")
-                    # Return the dedup table name and flag that dedup was needed
-                    return original_table_name, (
-                        formatted_key,
-                        note,
-                        dedup_table_name,
-                        True,
-                    )
-                else:
-                    # No key found even after dedup - clean up the dedup table
-                    try:
-                        connector.run_query(f"DROP TABLE IF EXISTS {dedup_table_name}")
-                    except Exception as cleanup_error:
-                        logger.warning(
-                            f"Failed to drop dedup table {dedup_table_name}: {cleanup_error}"
-                        )
-
-                    logger.warning(
-                        f"No keys found even after deduplication for {original_table_name}"
-                    )
-                    return original_table_name, (
-                        None,
-                        "No keys found (even after deduplication)",
-                        None,
-                        False,
-                    )
-
-            except Exception as dedup_error:
-                logger.error(
-                    f"Error during deduplication attempt for {original_table_name}: {dedup_error}"
+            if dedup_keys:
+                # Found a key in deduplicated version - keep the materialized table
+                primary_key = dedup_keys[0]
+                formatted_key = ", ".join(primary_key)
+                note = f"Primary key found: {formatted_key}, but table has duplicate records - using deduplicated table"
+                logger.warning(f"{original_table_name}: {note}")
+                # Return the dedup table name and flag that dedup was needed
+                return original_table_name, (
+                    formatted_key,
+                    note,
+                    dedup_table_name,
+                    True,
+                )
+            else:
+                # No key found even after dedup - clean up the dedup table
+                drop_table_if_exists(connector, dedup_table_name)
+                logger.warning(
+                    f"No keys found even after deduplication for {original_table_name}"
                 )
                 return original_table_name, (
                     None,
-                    f"No keys found (deduplication failed: {str(dedup_error)})",
+                    "No keys found (even after deduplication)",
                     None,
                     False,
                 )
@@ -992,21 +1003,20 @@ def find_keys_for_table(
     finally:
         # Clean up sample table if it was created
         if sample_table_name:
-            try:
-                connector.run_query(f"DROP TABLE IF EXISTS {sample_table_name}")
-                logger.debug(f"Dropped sample table: {sample_table_name}")
-            except Exception as cleanup_error:
-                logger.warning(
-                    f"Failed to drop sample table {sample_table_name}: {cleanup_error}"
-                )
+            drop_table_if_exists(connector, sample_table_name)
+
+
+def drop_table_if_exists(connector, table_name: str):
+    for drop_type in ["TABLE", "VIEW"]:
+        try:
+            connector.run_query(f"DROP {drop_type} IF EXISTS {table_name}")
+            logger.debug(f"Dropped {drop_type.lower()}: {table_name}")
+            return
+        except Exception:
+            continue
 
 
 def cleanup_temp_tables(connector):
-    """Drop all temp_dedup_* tables/views from the database
-
-    Args:
-        connector: Database connector
-    """
     try:
         # Query to find all temp_dedup_* tables and views
         query = """
@@ -1015,51 +1025,13 @@ def cleanup_temp_tables(connector):
             WHERE table_name LIKE 'temp_dedup_%'
         """
 
-        try:
-            result = connector.run_query(query)
+        result = connector.run_query(query)
 
-            if result:
-                logger.info(f"Dropping {len(result)} temp_dedup_* objects")
-                for row in result:
-                    table_name = row[0]
-                    table_type = row[1]
-                    drop_type = "VIEW" if table_type == "VIEW" else "TABLE"
-                    try:
-                        connector.run_query(f"DROP {drop_type} IF EXISTS {table_name}")
-                        logger.debug(f"Dropped {drop_type.lower()}: {table_name}")
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to drop {drop_type.lower()} {table_name}: {e}"
-                        )
-
-        except Exception as e:
-            # If information_schema query fails, try alternative approach for DuckDB
-            logger.debug(f"Standard cleanup query failed, trying alternative: {e}")
-            try:
-                # DuckDB-specific query
-                result = connector.run_query("SHOW TABLES")
-                temp_objects = (
-                    [row[0] for row in result if row[0].startswith("temp_dedup_")]
-                    if result
-                    else []
-                )
-
-                if temp_objects:
-                    logger.info(f"Dropping {len(temp_objects)} temp_dedup_* objects")
-                    for obj_name in temp_objects:
-                        # Try both TABLE and VIEW
-                        for drop_type in ["TABLE", "VIEW"]:
-                            try:
-                                connector.run_query(
-                                    f"DROP {drop_type} IF EXISTS {obj_name}"
-                                )
-                                logger.debug(f"Dropped {drop_type.lower()}: {obj_name}")
-                                break
-                            except Exception:
-                                continue
-
-            except Exception as e2:
-                logger.warning(f"Could not clean up temp objects: {e2}")
+        if result:
+            logger.info(f"Dropping {len(result)} temp_dedup_* objects")
+            for row in result:
+                table_name = row[0]
+                drop_table_if_exists(connector, table_name)
 
     except Exception as e:
         logger.warning(f"Error during temp object cleanup: {e}")
@@ -1237,59 +1209,6 @@ def keyfinder(
                             _, _, source_dedup_table, source_dedup_needed = results[
                                 source
                             ]
-
-                            # If source needed dedup and target hasn't been processed yet or didn't need dedup
-                            if source_dedup_needed and target in results:
-                                (
-                                    target_key,
-                                    target_error,
-                                    target_dedup_table,
-                                    target_dedup_needed,
-                                ) = results[target]
-
-                                # If target found a key but didn't need dedup, create dedup table for consistency
-                                if target_key and not target_dedup_needed:
-                                    logger.info(
-                                        f"Source table {source} needed deduplication, creating dedup table for target {target} as well"
-                                    )
-
-                                    # Get ALL columns for target table (not limited by max_columns)
-                                    try:
-                                        target_all_columns = get_column_names(
-                                            connector, target
-                                        )
-
-                                        if target_all_columns:
-                                            # Create dedup table for target using ALL columns
-                                            target_dedup_name = (
-                                                f"dedup_{target.replace('.', '_')}"
-                                            )
-                                            all_col_list = ", ".join(target_all_columns)
-                                            dedup_query = f"""
-                                                CREATE OR REPLACE TABLE {target_dedup_name} AS
-                                                SELECT {all_col_list}
-                                                FROM {target}
-                                                GROUP BY {all_col_list}
-                                            """
-
-                                            connector.run_query(dedup_query)
-                                            logger.info(
-                                                f"Created deduplicated table: {target_dedup_name}"
-                                            )
-
-                                            # Update results with dedup table info
-                                            note = f"Primary key found: {target_key}, deduplicated for consistency with source table"
-                                            results[target] = (
-                                                target_key,
-                                                note,
-                                                target_dedup_name,
-                                                True,
-                                            )
-
-                                    except Exception as e:
-                                        logger.error(
-                                            f"Failed to create dedup table for target {target}: {e}"
-                                        )
 
             finally:
                 # Clean up any temp objects before disconnecting (dedup_ tables are kept)
