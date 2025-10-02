@@ -7,6 +7,7 @@ from collections import defaultdict
 from dbqt.tools.utils import load_config, setup_logging, Timer
 from dbqt.connections import create_connector
 from math import comb
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +110,7 @@ class NonKeySet:
 
 
 def build_prefix_tree(
-    connector, table_name: str, columns: List[str]
+    connector, table_name: str, columns: List[str], verbose: bool = False
 ) -> Optional[PrefixTreeNode]:
     """
     Build a prefix tree from the table data.
@@ -133,11 +134,16 @@ def build_prefix_tree(
         total_rows = len(result)
         logger.info(f"Processing {total_rows:,} rows...")
 
-        # Process each row
-        for row_idx, row in enumerate(result):
-            if row_idx % 10000 == 0 and row_idx > 0:
-                logger.debug(f"Processed {row_idx:,} rows...")
+        # Process each row with progress bar
+        pbar = tqdm(
+            result,
+            total=total_rows,
+            desc="Building prefix tree",
+            unit="rows",
+            disable=not verbose,
+        )
 
+        for row_idx, row in enumerate(pbar):
             node = root
 
             # Process each attribute value in the row
@@ -153,6 +159,7 @@ def build_prefix_tree(
                     if cell.count > 1:
                         # Found duplicate entity - no keys exist
                         logger.error(f"Duplicate entity found at row {row_idx + 1}")
+                        pbar.close()
                         return None
                     cell.sum_counts = cell.count
                 else:
@@ -161,6 +168,8 @@ def build_prefix_tree(
                         cell.child = PrefixTreeNode(attr_idx + 1)
                         cell.child.is_leaf = is_last
                     node = cell.child
+
+        pbar.close()
 
         # Update sum_counts bottom-up
         _update_sum_counts(root)
@@ -240,9 +249,18 @@ def find_non_keys_gordian(
     non_key_set = NonKeySet(len(columns))
     cur_non_key = []  # Current attribute path being explored
 
+    # Progress tracking
+    nodes_visited = [0]
+    pbar = tqdm(desc="Finding non-keys", unit=" nodes", disable=not verbose)
+
     def non_key_finder(node: PrefixTreeNode):
         """Recursive function to find non-keys (Algorithm 4)."""
         nonlocal cur_non_key
+
+        # Update progress
+        nodes_visited[0] += 1
+        pbar.update(1)
+        pbar.set_postfix({"non-keys": len(non_key_set.non_keys)})
 
         # Add current attribute to path
         cur_non_key.append(node.attr_no)
@@ -301,9 +319,12 @@ def find_non_keys_gordian(
 
     # Start the recursive search
     non_key_finder(root)
+    pbar.close()
 
     non_keys = non_key_set.get_non_keys()
-    logger.info(f"Found {len(non_keys)} non-redundant non-keys")
+    logger.info(
+        f"Found {len(non_keys)} non-redundant non-keys (visited {nodes_visited[0]} nodes)"
+    )
 
     if verbose:
         for nk in non_keys:
@@ -314,7 +335,7 @@ def find_non_keys_gordian(
 
 
 def convert_non_keys_to_keys(
-    non_key_set: NonKeySet, columns: List[str]
+    non_key_set: NonKeySet, columns: List[str], verbose: bool = False
 ) -> List[Tuple[str, ...]]:
     """
     Convert non-keys to minimal keys (Algorithm 6).
@@ -332,7 +353,10 @@ def convert_non_keys_to_keys(
     # Start with empty key set
     key_set = []
 
-    for nk_indices in non_keys:
+    # Process non-keys with progress bar
+    for nk_indices in tqdm(
+        non_keys, desc="Converting to keys", unit="non-keys", disable=not verbose
+    ):
         # Compute complement: attributes NOT in this non-key
         complement = []
         for i, col in enumerate(columns):
@@ -407,7 +431,7 @@ def find_keys_gordian(
     logger.info(f"Analyzing {len(columns)} columns")
 
     # Step 1: Build prefix tree
-    prefix_tree = build_prefix_tree(connector, table_name, columns)
+    prefix_tree = build_prefix_tree(connector, table_name, columns, verbose)
 
     if prefix_tree is None:
         logger.warning(
@@ -428,7 +452,9 @@ def find_keys_gordian(
             logger.info(f"Created temporary deduplicated table: {dedup_table_name}")
 
             # Try building prefix tree again on deduplicated data
-            prefix_tree = build_prefix_tree(connector, dedup_table_name, columns)
+            prefix_tree = build_prefix_tree(
+                connector, dedup_table_name, columns, verbose
+            )
 
             # Clean up temporary table
             try:
@@ -451,7 +477,7 @@ def find_keys_gordian(
     non_key_set = find_non_keys_gordian(prefix_tree, columns, verbose)
 
     # Step 3: Convert non-keys to keys
-    keys = convert_non_keys_to_keys(non_key_set, columns)
+    keys = convert_non_keys_to_keys(non_key_set, columns, verbose)
 
     return keys
 
