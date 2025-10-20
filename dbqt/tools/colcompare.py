@@ -8,13 +8,15 @@ from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
 import os
 from datetime import datetime
+from pathlib import Path
+import yaml
 from dbqt.tools.utils import Timer, setup_logging
 import logging
 
 logger = logging.getLogger(__name__)
 
-# Define type mappings for equivalent data types
-TYPE_MAPPINGS = {
+# Define default type mappings for equivalent data types
+DEFAULT_TYPE_MAPPINGS = {
     "INTEGER": ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "NUMBER"],
     "VARCHAR": ["VARCHAR", "TEXT", "CHAR", "STRING", "NVARCHAR"],
     "DECIMAL": ["DECIMAL", "NUMERIC", "NUMBER"],
@@ -25,8 +27,45 @@ TYPE_MAPPINGS = {
 }
 
 
-def are_types_compatible(type1, type2):
+def load_type_mappings(config_path=None):
+    """Load type mappings from YAML config file or return defaults"""
+    if config_path and Path(config_path).exists():
+        logger.info(f"Loading type mappings from {config_path}")
+        with open(config_path, "r") as f:
+            config = yaml.safe_load(f)
+            return config.get("type_mappings", DEFAULT_TYPE_MAPPINGS)
+    return DEFAULT_TYPE_MAPPINGS
+
+
+def generate_config_file(output_path="colcompare_config.yaml"):
+    """Generate a default configuration file with type mappings"""
+    config = {
+        "type_mappings": DEFAULT_TYPE_MAPPINGS,
+        "description": "Column comparison type mappings configuration. "
+        "Each key represents a type group, and the list contains equivalent types.",
+    }
+
+    output_file = Path(output_path)
+    if output_file.exists():
+        logger.warning(f"Config file already exists at {output_path}")
+        response = input("Overwrite? (y/n): ")
+        if response.lower() != "y":
+            logger.info("Config generation cancelled")
+            return
+
+    with open(output_path, "w") as f:
+        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+
+    logger.info(f"Generated default config file at {output_path}")
+    print(f"\nDefault configuration saved to: {output_path}")
+    print("You can now edit this file to customize type mappings.")
+
+
+def are_types_compatible(type1, type2, type_mappings=None):
     """Check if two data types are considered compatible"""
+    if type_mappings is None:
+        type_mappings = DEFAULT_TYPE_MAPPINGS
+
     type1, type2 = type1.upper(), type2.upper()
 
     # Strip length specifications like VARCHAR(50) to VARCHAR
@@ -42,7 +81,7 @@ def are_types_compatible(type1, type2):
         return True
 
     # Check if types belong to the same group
-    for type_group in TYPE_MAPPINGS.values():
+    for type_group in type_mappings.values():
         if type1 in type_group and type2 in type_group:
             return True
 
@@ -224,7 +263,7 @@ def compare_tables(source_df, target_df):
     }
 
 
-def compare_columns(source_df, target_df, table_name):
+def compare_columns(source_df, target_df, table_name, type_mappings=None):
     """Compare columns for a specific table"""
     source_cols = source_df.filter(pl.col("SCH_TABLE") == table_name).select(
         ["COL_NAME", "DATA_TYPE"]
@@ -245,7 +284,7 @@ def compare_columns(source_df, target_df, table_name):
     for col in common_cols:
         source_type = source_cols.filter(pl.col("COL_NAME") == col)["DATA_TYPE"].item()
         target_type = target_cols.filter(pl.col("COL_NAME") == col)["DATA_TYPE"].item()
-        if not are_types_compatible(source_type, target_type):
+        if not are_types_compatible(source_type, target_type, type_mappings):
             datatype_mismatches.append(
                 {"column": col, "source_type": source_type, "target_type": target_type}
             )
@@ -287,7 +326,9 @@ def format_worksheet(ws):
         ws.column_dimensions[get_column_letter(column[0].column)].width = adjusted_width
 
 
-def create_excel_report(comparison_results, source_df, target_df, table_name):
+def create_excel_report(
+    comparison_results, source_df, target_df, table_name, type_mappings=None
+):
     """Create formatted Excel report"""
     wb = Workbook()
 
@@ -337,7 +378,7 @@ def create_excel_report(comparison_results, source_df, target_df, table_name):
             elif col in table["target_only"]:
                 status = "Target Only"
             else:  # Column exists in both
-                if are_types_compatible(source_type, target_type):
+                if are_types_compatible(source_type, target_type, type_mappings):
                     status = "Matching"
                 else:
                     status = "Different Types"
@@ -373,7 +414,7 @@ def create_excel_report(comparison_results, source_df, target_df, table_name):
     wb.save(f"results/{table_name}_{timestamp}.xlsx")
 
 
-def colcompare(args):
+def colcompare(args=None):
     if isinstance(args, (list, type(None))):
         # Called from command line
         parser = argparse.ArgumentParser(
@@ -386,17 +427,52 @@ Generates an Excel report with three sheets:
 - Datatype Mismatches: Highlights columns with incompatible types
 
 The report is saved to ./results/ with a timestamp in the filename.
+
+To generate a default configuration file:
+  dbqt colcompare --generate-config [--output PATH]
             """,
         )
-        parser.add_argument("source", help="Path to the source CSV/Parquet file")
-        parser.add_argument("target", help="Path to the target CSV/Parquet file")
+
+        parser.add_argument(
+            "--generate-config",
+            action="store_true",
+            help="Generate a default type mappings configuration file",
+        )
+        parser.add_argument(
+            "--output",
+            "-o",
+            default="colcompare_config.yaml",
+            help="Output path for config file (used with --generate-config)",
+        )
+        parser.add_argument(
+            "source", nargs="?", help="Path to the source CSV/Parquet file"
+        )
+        parser.add_argument(
+            "target", nargs="?", help="Path to the target CSV/Parquet file"
+        )
+        parser.add_argument(
+            "--config", "-c", help="Path to type mappings configuration file"
+        )
         parser.add_argument(
             "--verbose", "-v", action="store_true", help="Verbose logging"
         )
+
         args = parser.parse_args(args)
 
-        # Setup logging if called from command line
+        # Setup logging
         setup_logging(args.verbose)
+
+        # Handle generate-config command
+        if args.generate_config:
+            generate_config_file(args.output)
+            return
+
+        # Validate that source and target are provided for comparison
+        if not args.source or not args.target:
+            parser.error("source and target arguments are required for comparison")
+
+    # Load type mappings
+    type_mappings = load_type_mappings(getattr(args, "config", None))
 
     with Timer("Column comparison"):
         # Read source and target files
@@ -408,15 +484,24 @@ The report is saved to ./results/ with a timestamp in the filename.
         # Compare columns for common tables
         column_comparisons = []
         for table in table_comparison["common"]:
-            column_comparison = compare_columns(source_df, target_df, table)
+            column_comparison = compare_columns(
+                source_df, target_df, table, type_mappings
+            )
             column_comparisons.append({"table_name": table, **column_comparison})
 
         # Create comparison results dictionary
         comparison_results = {"tables": table_comparison, "columns": column_comparisons}
         table_name = args.target.split(".")[1].strip("/")
         # Generate Excel report
-        create_excel_report(comparison_results, source_df, target_df, table_name)
+        create_excel_report(
+            comparison_results, source_df, target_df, table_name, type_mappings
+        )
+
+
+def main(args=None):
+    """Entry point for the colcompare tool"""
+    colcompare(args)
 
 
 if __name__ == "__main__":
-    colcompare()
+    main()
