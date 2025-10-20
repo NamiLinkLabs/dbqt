@@ -18,11 +18,11 @@ logger = logging.getLogger(__name__)
 # Define default type mappings for equivalent data types
 DEFAULT_TYPE_MAPPINGS = {
     "INTEGER": ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "NUMBER"],
-    "VARCHAR": ["VARCHAR", "TEXT", "CHAR", "STRING", "NVARCHAR"],
+    "VARCHAR": ["VARCHAR", "TEXT", "CHAR", "STRING", "NVARCHAR", "VARCHAR2"],
     "DECIMAL": ["DECIMAL", "NUMERIC", "NUMBER"],
     "FLOAT": ["FLOAT", "REAL", "DOUBLE", "DOUBLE PRECISION"],
     "TIMESTAMP": ["TIMESTAMP", "DATETIME"],
-    "DATE": ["DATE"],
+    "DATE": ["DATE", "TIMESTAMP"],
     "BOOLEAN": ["BOOLEAN", "BOOL", "BIT"],
 }
 
