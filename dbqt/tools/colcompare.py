@@ -327,7 +327,7 @@ def format_worksheet(ws):
 
 
 def create_excel_report(
-    comparison_results, source_df, target_df, table_name, type_mappings=None
+    comparison_results, source_df, target_df, file_name, type_mappings=None
 ):
     """Create formatted Excel report"""
     wb = Workbook()
@@ -409,9 +409,9 @@ def create_excel_report(
     # Save the workbook with timestamp
     os.makedirs("results", exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    if "/" in table_name:
-        table_name = table_name.split("/")[-1]
-    wb.save(f"results/{table_name}_{timestamp}.xlsx")
+    if "/" in file_name:
+        file_name = file_name.split("/")[-1]
+    wb.save(f"results/{file_name}_{timestamp}.xlsx")
 
 
 def colcompare(args=None):
@@ -491,10 +491,10 @@ To generate a default configuration file:
 
         # Create comparison results dictionary
         comparison_results = {"tables": table_comparison, "columns": column_comparisons}
-        table_name = args.target.split(".")[1].strip("/")
+        target_file_name = args.target.split(".")[0]
         # Generate Excel report
         create_excel_report(
-            comparison_results, source_df, target_df, table_name, type_mappings
+            comparison_results, source_df, target_df, target_file_name, type_mappings
         )
 
 
