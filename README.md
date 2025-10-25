@@ -11,6 +11,7 @@ Compare schemas between databases or files:
 - Support for CSV and Parquet files
 - Handles nested Parquet schemas (arrays, structs, maps)
 - Intelligent data type compatibility checking
+- **Customizable type mappings via YAML configuration**
 - Generates detailed Excel report with:
   - Table differences
   - Column differences
@@ -19,10 +20,56 @@ Compare schemas between databases or files:
 
 Usage:
 ```bash
+# Basic comparison
 dbqt compare source_schema.csv target_schema.csv
-# Or compare Parquet files directly:
+
+# Compare Parquet files directly
 dbqt compare source.parquet target.parquet
+
+# Generate a default type mappings configuration file
+dbqt compare --generate-config
+
+# Generate config with custom output path
+dbqt compare --generate-config --output my_types.yaml
+
+# Use custom type mappings for comparison
+dbqt compare source.csv target.csv --config my_types.yaml
 ```
+
+**Customizing Type Mappings:**
+
+The tool uses intelligent type compatibility checking (e.g., `INT` and `BIGINT` are considered compatible). You can customize these mappings:
+
+1. Generate a default configuration file:
+   ```bash
+   dbqt compare --generate-config
+   ```
+
+2. Edit the generated `colcompare_config.yaml` file to add or modify type groups:
+   ```yaml
+   description: Column comparison type mappings configuration. Each key represents a type group, and the list contains equivalent types.
+   type_mappings:
+     INTEGER:
+     - INT
+     - INTEGER
+     - BIGINT
+     - SMALLINT
+     - TINYINT
+     - NUMBER
+     VARCHAR:
+     - VARCHAR
+     - TEXT
+     - CHAR
+     - STRING
+     - NVARCHAR
+     - VARCHAR2
+     # Add your custom types here
+   ```
+
+3. Use your custom configuration:
+   ```bash
+   dbqt compare source.csv target.csv --config colcompare_config.yaml
+   ```
 
 To generate CSV schema files from your database, run this query:
 ```sql
