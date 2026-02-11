@@ -395,12 +395,12 @@ To generate a default configuration file:
   dbqt colcompare --generate-config [--output PATH]
             """,
         )
-        parser.add_argument("--generate-config", action="store_true",
-                            help="Generate a default type mappings configuration file")
+        parser.add_argument("--generate-col-mappings", action="store_true",
+                            help="Generate a default column type mappings configuration file")
         parser.add_argument("--output", "-o", default="colcompare_config.yaml",
                             help="Output path for config file (used with --generate-config)")
         parser.add_argument("source", nargs="?", help="Path to the source CSV/Parquet file")
-        parser.add_argument("tt", nargs="?", help="Path to the target CSV/Parquet file")
+        parser.add_argument("target", nargs="?", help="Path to the target CSV/Parquet file")
         parser.add_argument("--source-config", help="YAML config for source database")
         parser.add_argument("--target-config", help="YAML config for target database")
         parser.add_argument("--config", "-c", help="Path to type mappings configuration file")
@@ -409,7 +409,7 @@ To generate a default configuration file:
         args = parser.parse_args(args)
         setup_logging(args.verbose)
 
-        if args.generate_config:
+        if args.generate_col_mappings:
             generate_config_file(args.output)
             return
 

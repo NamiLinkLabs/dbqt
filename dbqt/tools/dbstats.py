@@ -182,9 +182,9 @@ Examples:
     parser.add_argument("--target-config", help="YAML config for target database")
     parser.add_argument("--type-config", help="Path to type mappings config file (colcompare mode)")
     parser.add_argument(
-        "--generate-config",
+        "--generate-col-mappings",
         action="store_true",
-        help="Generate a default type mappings configuration file",
+        help="Generate a default column type mappings configuration file",
     )
     parser.add_argument(
         "--output", "-o",
@@ -200,7 +200,7 @@ Examples:
 
     setup_logging(args.verbose)
 
-    if args.generate_config:
+    if args.generate_col_mappings:
         generate_config_file(args.output)
         return
 
