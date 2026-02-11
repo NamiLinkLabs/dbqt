@@ -14,7 +14,7 @@ from reladiff import connect as reladiff_connect
 logger = logging.getLogger(__name__)
 
 
-def _normalize_table_path(table_name, config=None):
+def normalize_table_path(table_name, config=None):
     """Resolve table_name into (database, schema, table) using config defaults."""
     if config is None:
         config = {}
@@ -29,7 +29,7 @@ def _normalize_table_path(table_name, config=None):
         return default_db, default_schema, parts[0]
 
 
-def _qualified_name(database, schema, table_name):
+def build_qualified_table_name(database, schema, table_name):
     """Build a dot-separated qualified name, skipping None components."""
     return ".".join(p for p in (database, schema, table_name) if p)
 
@@ -63,7 +63,7 @@ class DBConnector(ABC):
         return result
 
     def fetch_table_metadata(self, table_name):
-        db, schema, tbl = _normalize_table_path(table_name, self.config)
+        db, schema, tbl = normalize_table_path(table_name, self.config)
         where_parts = [f"upper(table_name) = upper('{tbl}')"]
         if schema:
             where_parts.append(f"upper(table_schema) = upper('{schema}')")
@@ -92,8 +92,8 @@ class DBConnector(ABC):
     def count_rows(self, table_name, where_clause=None):
         """Retrieve the total number of rows in a table."""
         try:
-            db, schema, tbl = _normalize_table_path(table_name, self.config)
-            qualified = _qualified_name(db, schema, tbl)
+            db, schema, tbl = normalize_table_path(table_name, self.config)
+            qualified = build_qualified_table_name(db, schema, tbl)
             query = f"SELECT COUNT(*) FROM {qualified}"
             if where_clause:
                 query += f" WHERE {where_clause}"
@@ -117,7 +117,7 @@ class MySQL(DBConnector):
         return conn_str
 
     def fetch_table_metadata(self, table_name):
-        db, schema, tbl = _normalize_table_path(table_name, self.config)
+        db, schema, tbl = normalize_table_path(table_name, self.config)
         db_filter = schema or self.config.get("database", "")
         query = f"""
         SELECT UPPER(COLUMN_NAME) AS COLUMN_NAME, DATA_TYPE,
@@ -144,7 +144,7 @@ class Snowflake(DBConnector):
         return conn_str
 
     def fetch_table_metadata(self, table_name):
-        db, schema, tbl = _normalize_table_path(table_name, self.config)
+        db, schema, tbl = normalize_table_path(table_name, self.config)
         catalog = db or self.config.get("database", "")
         schema = schema or self.config.get("schema", "")
         query = f"""
@@ -330,7 +330,7 @@ class SQLServer(DBConnector):
         return result if result else "Success"
 
     def fetch_table_metadata(self, table_name):
-        db, schema, tbl = _normalize_table_path(table_name, self.config)
+        db, schema, tbl = normalize_table_path(table_name, self.config)
         schema = schema or self.config.get("schema", "dbo")
         query = f"""
         SELECT UPPER(COLUMN_NAME) AS COLUMN_NAME, DATA_TYPE,
@@ -436,7 +436,7 @@ class Oracle(DBConnector):
         return result if result else "Success"
 
     def fetch_table_metadata(self, table_name):
-        db, schema, tbl = _normalize_table_path(table_name, self.config)
+        db, schema, tbl = normalize_table_path(table_name, self.config)
         schema = schema or self.config.get("schema", self.config["user"].upper())
         query = f"""
         SELECT UPPER(COLUMN_NAME) AS COLUMN_NAME, DATA_TYPE,

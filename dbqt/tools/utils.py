@@ -6,7 +6,11 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dbqt.connections import create_connector  # noqa: F401 — re-export
+from dbqt.connections import (  # noqa: F401 — re-export
+    create_connector,
+    normalize_table_path,
+    build_qualified_table_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -162,37 +166,6 @@ def format_runtime(seconds: float) -> str:
         remaining_minutes = int((seconds % 3600) // 60)
         remaining_seconds = seconds % 60
         return f"{hours}h {remaining_minutes}m {remaining_seconds:.2f}s"
-
-
-def normalize_table_path(table_name: str, config: dict = None) -> tuple:
-    """Resolve a table reference into (database, schema, table) tuple.
-
-    Supports:
-      - ``table``              → (config db, config schema, table)
-      - ``schema.table``       → (config db, schema, table)
-      - ``db.schema.table``    → (db, schema, table)
-
-    Returns a 3-tuple ``(database, schema, table)`` where any component
-    may be ``None`` if it cannot be determined.
-    """
-    if config is None:
-        config = {}
-
-    parts = table_name.split(".")
-    default_db = config.get("database") or config.get("sid")
-    default_schema = config.get("schema")
-
-    if len(parts) == 3:
-        return parts[0], parts[1], parts[2]
-    elif len(parts) == 2:
-        return default_db, parts[0], parts[1]
-    else:
-        return default_db, default_schema, parts[0]
-
-
-def build_qualified_table_name(database, schema, table) -> str:
-    """Build a fully-qualified table name from resolved components, skipping Nones."""
-    return ".".join(p for p in (database, schema, table) if p)
 
 
 def _read_table_lists(tables_file):
