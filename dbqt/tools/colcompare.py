@@ -20,6 +20,7 @@ from dbqt.tools.utils import (
     setup_logging,
     Timer,
     fetch_metadata_parallel,
+    fetch_all_metadata_as_df,
     _read_table_lists,
     discover_tables_from_db,
 )
@@ -368,8 +369,10 @@ def colcompare_from_db(source_config_path, target_config_path, type_mappings=Non
         if target_tables is None:
             target_tables = source_tables
 
-        source_df = fetch_metadata_parallel(source_config, source_tables, "source:", max_workers)
-        target_df = fetch_metadata_parallel(target_config, target_tables, "target:", max_workers)
+        # Fetch all column metadata per schema in a single query each,
+        # then filter to only the tables we care about.
+        source_df = fetch_all_metadata_as_df(source_config, source_tables)
+        target_df = fetch_all_metadata_as_df(target_config, target_tables)
 
         report_name = Path(tables_file).stem
         _run_comparison(source_df, target_df, report_name, type_mappings)

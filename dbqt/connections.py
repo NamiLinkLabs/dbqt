@@ -103,6 +103,27 @@ class DBConnector(ABC):
             self.logger.error(f"Error counting rows for {table_name}: {str(e)}")
             return None
 
+    def fetch_schema_metadata(self, schema=None):
+        """Fetch column metadata for ALL tables in a schema in one query.
+
+        Returns a list of (table_name, column_name, data_type,
+        datetime_precision, numeric_precision, numeric_scale) tuples.
+        """
+        schema = schema or self.config.get("schema")
+        where_parts = []
+        if schema:
+            where_parts.append(f"upper(table_schema) = upper('{schema}')")
+        where_clause = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        query = (
+            "SELECT table_name, column_name, data_type,"
+            " datetime_precision, numeric_precision, numeric_scale"
+            f" FROM information_schema.columns{where_clause}"
+            " ORDER BY table_name, ordinal_position"
+        )
+        self.logger.info(f"Fetching schema-wide metadata (schema={schema})")
+        result = self.run_query(query)
+        return [(row[0], row[1], row[2], row[3], row[4], row[5]) for row in result]
+
     def list_tables(self, schema=None):
         """List all tables and views in the given schema (or config default)."""
         schema = schema or self.config.get("schema")
@@ -129,6 +150,19 @@ class DBConnector(ABC):
 
 
 class MySQL(DBConnector):
+    def fetch_schema_metadata(self, schema=None):
+        schema = schema or self.config.get("database", "")
+        query = f"""
+        SELECT UPPER(TABLE_NAME), UPPER(COLUMN_NAME), DATA_TYPE,
+               DATETIME_PRECISION, NUMERIC_PRECISION, NUMERIC_SCALE
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE UPPER(TABLE_SCHEMA) = UPPER('{schema}')
+        ORDER BY TABLE_NAME, ORDINAL_POSITION
+        """
+        self.logger.info(f"Fetching schema-wide metadata (database={schema})")
+        result = self.run_query(query)
+        return [(row[0], row[1], row[2], row[3], row[4], row[5]) for row in result]
+
     def list_tables(self, schema=None):
         schema = schema or self.config.get("database")
         if not schema:
@@ -166,6 +200,21 @@ class MySQL(DBConnector):
 
 
 class Snowflake(DBConnector):
+    def fetch_schema_metadata(self, schema=None):
+        catalog = self.config.get("database", "")
+        schema = schema or self.config.get("schema", "")
+        query = f"""
+        SELECT UPPER(TABLE_NAME), UPPER(COLUMN_NAME), DATA_TYPE,
+               DATETIME_PRECISION, NUMERIC_PRECISION, NUMERIC_SCALE
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE UPPER(TABLE_CATALOG) = UPPER('{catalog}')
+        AND UPPER(TABLE_SCHEMA) = UPPER('{schema}')
+        ORDER BY TABLE_NAME, ORDINAL_POSITION
+        """
+        self.logger.info(f"Fetching schema-wide metadata ({catalog}.{schema})")
+        result = self.run_query(query)
+        return [(row[0], row[1], row[2], row[3], row[4], row[5]) for row in result]
+
     def list_tables(self, schema=None):
         catalog = self.config.get("database", "")
         schema = schema or self.config.get("schema", "")
@@ -349,6 +398,19 @@ class PostgreSQL(DBConnector):
 
 
 class SQLServer(DBConnector):
+    def fetch_schema_metadata(self, schema=None):
+        schema = schema or self.config.get("schema", "dbo")
+        query = f"""
+        SELECT UPPER(TABLE_NAME), UPPER(COLUMN_NAME), DATA_TYPE,
+               DATETIME_PRECISION, NUMERIC_PRECISION, NUMERIC_SCALE
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE UPPER(TABLE_SCHEMA) = UPPER('{schema}')
+        ORDER BY TABLE_NAME, ORDINAL_POSITION
+        """
+        self.logger.info(f"Fetching schema-wide metadata (schema={schema})")
+        result = self.run_query(query)
+        return [(row[0], row[1], row[2], row[3], row[4], row[5]) for row in result]
+
     def list_tables(self, schema=None):
         schema = schema or self.config.get("schema", "dbo")
         query = (
@@ -407,6 +469,20 @@ class SQLServer(DBConnector):
 
 
 class Oracle(DBConnector):
+    def fetch_schema_metadata(self, schema=None):
+        schema = schema or self.config.get("schema", self.config["user"].upper())
+        query = f"""
+        SELECT UPPER(TABLE_NAME), UPPER(COLUMN_NAME), DATA_TYPE,
+               6 AS DATETIME_PRECISION, DATA_PRECISION AS NUMERIC_PRECISION,
+               DATA_SCALE AS NUMERIC_SCALE
+        FROM ALL_TAB_COLUMNS
+        WHERE UPPER(OWNER) = UPPER('{schema}')
+        ORDER BY TABLE_NAME, COLUMN_ID
+        """
+        self.logger.info(f"Fetching schema-wide metadata (schema={schema})")
+        result = self.run_query(query)
+        return [(row[0], row[1], row[2], row[3], row[4], row[5]) for row in result]
+
     def list_tables(self, schema=None):
         schema = schema or self.config.get("schema", self.config["user"].upper())
         query = (

@@ -297,6 +297,56 @@ def fetch_metadata_parallel(config, table_names, prefix="", max_workers=4):
     return metadata_to_df(results, table_names)
 
 
+def fetch_all_metadata_as_df(config, table_names=None):
+    """Fetch column metadata for an entire schema in ONE query, return a Polars DataFrame.
+
+    If *table_names* is provided the result is filtered to only those tables.
+    This is much faster than ``fetch_metadata_parallel`` when many tables are
+    involved because it issues a single ``SELECT … FROM information_schema.columns``
+    (or equivalent) instead of one query per table.
+    """
+    import polars as pl
+
+    connector = create_connector(config["connection"])
+    connector.connect()
+    try:
+        raw = connector.fetch_schema_metadata()
+    finally:
+        connector.disconnect()
+
+    # raw rows: (table_name, column_name, data_type, dt_prec, num_prec, num_scale)
+    if not raw:
+        return pl.DataFrame(
+            schema={
+                "SCH_TABLE": pl.Utf8,
+                "COL_NAME": pl.Utf8,
+                "DATA_TYPE": pl.Utf8,
+                "DATETIME_PRECISION": pl.Int64,
+                "NUMERIC_PRECISION": pl.Int64,
+                "NUMERIC_SCALE": pl.Int64,
+            }
+        )
+
+    rows = [
+        {
+            "SCH_TABLE": str(r[0]).upper(),
+            "COL_NAME": str(r[1]).upper(),
+            "DATA_TYPE": str(r[2]).upper() if r[2] else "N/A",
+            "DATETIME_PRECISION": r[3],
+            "NUMERIC_PRECISION": r[4],
+            "NUMERIC_SCALE": r[5],
+        }
+        for r in raw
+    ]
+    df = pl.DataFrame(rows)
+
+    if table_names is not None:
+        upper_names = {t.upper() for t in table_names}
+        df = df.filter(pl.col("SCH_TABLE").is_in(upper_names))
+
+    return df
+
+
 class Timer:
     """Context manager for timing operations."""
 
