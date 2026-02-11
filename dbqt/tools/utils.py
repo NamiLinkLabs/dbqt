@@ -215,11 +215,25 @@ def _read_table_lists(tables_file, source_config=None, target_config=None):
 
         rows = []
         for t in common:
-            rows.append({"source_table": t, "target_table": t, "_discovery_status": "common"})
+            rows.append(
+                {"source_table": t, "target_table": t, "_discovery_status": "common"}
+            )
         for t in source_only:
-            rows.append({"source_table": t, "target_table": t, "_discovery_status": "source_only"})
+            rows.append(
+                {
+                    "source_table": t,
+                    "target_table": t,
+                    "_discovery_status": "source_only",
+                }
+            )
         for t in target_only:
-            rows.append({"source_table": t, "target_table": t, "_discovery_status": "target_only"})
+            rows.append(
+                {
+                    "source_table": t,
+                    "target_table": t,
+                    "_discovery_status": "target_only",
+                }
+            )
 
         df = pl.DataFrame(rows)
         return (
@@ -284,17 +298,6 @@ def metadata_to_df(results, table_names):
             }
         )
     return pl.DataFrame(rows)
-
-
-def fetch_metadata_parallel(config, table_names, prefix="", max_workers=4):
-    """Fetch metadata for many tables in parallel, return a Polars DataFrame."""
-    workers = min(max_workers, len(table_names))
-    with ConnectionPool(config, workers) as pool:
-        results = pool.execute_parallel(
-            lambda c, t: get_metadata_for_table(c, t, prefix),
-            table_names,
-        )
-    return metadata_to_df(results, table_names)
 
 
 def fetch_all_metadata_as_df(config, table_names=None):

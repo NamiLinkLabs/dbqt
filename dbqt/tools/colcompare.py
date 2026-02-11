@@ -19,10 +19,8 @@ from dbqt.tools.utils import (
     load_config,
     setup_logging,
     Timer,
-    fetch_metadata_parallel,
     fetch_all_metadata_as_df,
     _read_table_lists,
-    discover_tables_from_db,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,7 +111,9 @@ def _process_nested_type(field_type, parent_name="", processed_fields=None):
         if isinstance(element_type, pyarrow.lib.StructType):
             for nested_field in element_type:
                 full_name = (
-                    f"{parent_name}__{nested_field.name}" if parent_name else nested_field.name
+                    f"{parent_name}__{nested_field.name}"
+                    if parent_name
+                    else nested_field.name
                 )
                 if isinstance(
                     nested_field.type,
@@ -126,14 +126,18 @@ def _process_nested_type(field_type, parent_name="", processed_fields=None):
                 ):
                     _process_nested_type(nested_field.type, full_name, processed_fields)
                 else:
-                    processed_fields.append({"col_name": full_name, "type": str(nested_field.type)})
+                    processed_fields.append(
+                        {"col_name": full_name, "type": str(nested_field.type)}
+                    )
         else:
             processed_fields.append({"col_name": parent_name, "type": str(field_type)})
 
     elif isinstance(field_type, pyarrow.lib.StructType):
         for nested_field in field_type:
             full_name = (
-                f"{parent_name}__{nested_field.name}" if parent_name else nested_field.name
+                f"{parent_name}__{nested_field.name}"
+                if parent_name
+                else nested_field.name
             )
             if isinstance(
                 nested_field.type,
@@ -146,7 +150,9 @@ def _process_nested_type(field_type, parent_name="", processed_fields=None):
             ):
                 _process_nested_type(nested_field.type, full_name, processed_fields)
             else:
-                processed_fields.append({"col_name": full_name, "type": str(nested_field.type)})
+                processed_fields.append(
+                    {"col_name": full_name, "type": str(nested_field.type)}
+                )
 
     elif isinstance(field_type, pyarrow.lib.MapType):
         processed_fields.append({"col_name": parent_name, "type": str(field_type)})
@@ -207,7 +213,9 @@ def read_files(source_path, target_path):
     for df_ref, name in [(source_df, "source"), (target_df, "target")]:
         if "SCH" in df_ref.columns:
             df_ref = df_ref.with_columns(
-                pl.concat_str([pl.col("SCH"), pl.lit("."), pl.col("TABLE_NAME")]).alias("SCH_TABLE")
+                pl.concat_str([pl.col("SCH"), pl.lit("."), pl.col("TABLE_NAME")]).alias(
+                    "SCH_TABLE"
+                )
             )
         else:
             df_ref = df_ref.with_columns(pl.col("TABLE_NAME").alias("SCH_TABLE"))
@@ -237,8 +245,12 @@ def compare_tables(source_df, target_df):
 
 def compare_columns(source_df, target_df, table_name, type_mappings=None):
     """Compare columns for a specific table."""
-    source_cols = source_df.filter(pl.col("SCH_TABLE") == table_name).select(["COL_NAME", "DATA_TYPE"])
-    target_cols = target_df.filter(pl.col("SCH_TABLE") == table_name).select(["COL_NAME", "DATA_TYPE"])
+    source_cols = source_df.filter(pl.col("SCH_TABLE") == table_name).select(
+        ["COL_NAME", "DATA_TYPE"]
+    )
+    target_cols = target_df.filter(pl.col("SCH_TABLE") == table_name).select(
+        ["COL_NAME", "DATA_TYPE"]
+    )
 
     src_set = set(source_cols["COL_NAME"].to_list())
     tgt_set = set(target_cols["COL_NAME"].to_list())
@@ -266,7 +278,9 @@ def compare_columns(source_df, target_df, table_name, type_mappings=None):
 
 def _format_worksheet(ws):
     """Apply formatting to worksheet."""
-    header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+    header_fill = PatternFill(
+        start_color="366092", end_color="366092", fill_type="solid"
+    )
     header_font = Font(color="FFFFFF", bold=True)
     for cell in ws[1]:
         cell.fill = header_fill
@@ -275,10 +289,14 @@ def _format_worksheet(ws):
     for column in ws.columns:
         column = list(column)
         max_len = max((len(str(c.value or "")) for c in column), default=0)
-        ws.column_dimensions[get_column_letter(column[0].column)].width = min(max_len + 2, 21.6)
+        ws.column_dimensions[get_column_letter(column[0].column)].width = min(
+            max_len + 2, 21.6
+        )
 
 
-def create_excel_report(comparison_results, source_df, target_df, file_name, type_mappings=None):
+def create_excel_report(
+    comparison_results, source_df, target_df, file_name, type_mappings=None
+):
     """Create formatted Excel report."""
     wb = Workbook()
 
@@ -327,7 +345,9 @@ def create_excel_report(comparison_results, source_df, target_df, file_name, typ
     ws3.append(["Table Name", "Column Name", "Source Type", "Target Type"])
     for tbl in comparison_results["columns"]:
         for m in tbl["datatype_mismatches"]:
-            ws3.append([tbl["table_name"], m["column"], m["source_type"], m["target_type"]])
+            ws3.append(
+                [tbl["table_name"], m["column"], m["source_type"], m["target_type"]]
+            )
     _format_worksheet(ws3)
 
     os.makedirs("results", exist_ok=True)
@@ -360,7 +380,9 @@ def colcompare_from_db(source_config_path, target_config_path, type_mappings=Non
         source_config = load_config(source_config_path)
         target_config = load_config(target_config_path)
 
-        tables_file = source_config.get("tables_file") or target_config.get("tables_file")
+        tables_file = source_config.get("tables_file") or target_config.get(
+            "tables_file"
+        )
         max_workers = source_config.get("max_workers", 4)
         df, source_tables, target_tables = _read_table_lists(
             tables_file, source_config, target_config
@@ -397,16 +419,31 @@ To generate a default configuration file:
   dbqt colcompare --generate-config [--output PATH]
             """,
         )
-        parser.add_argument("--generate-col-mappings", action="store_true",
-                            help="Generate a default column type mappings configuration file")
-        parser.add_argument("--output", "-o", default="colcompare_config.yaml",
-                            help="Output path for config file (used with --generate-config)")
-        parser.add_argument("source", nargs="?", help="Path to the source CSV/Parquet file")
-        parser.add_argument("target", nargs="?", help="Path to the target CSV/Parquet file")
+        parser.add_argument(
+            "--generate-col-mappings",
+            action="store_true",
+            help="Generate a default column type mappings configuration file",
+        )
+        parser.add_argument(
+            "--output",
+            "-o",
+            default="colcompare_config.yaml",
+            help="Output path for config file (used with --generate-config)",
+        )
+        parser.add_argument(
+            "source", nargs="?", help="Path to the source CSV/Parquet file"
+        )
+        parser.add_argument(
+            "target", nargs="?", help="Path to the target CSV/Parquet file"
+        )
         parser.add_argument("--source-config", help="YAML config for source database")
         parser.add_argument("--target-config", help="YAML config for target database")
-        parser.add_argument("--config", "-c", help="Path to type mappings configuration file")
-        parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
+        parser.add_argument(
+            "--config", "-c", help="Path to type mappings configuration file"
+        )
+        parser.add_argument(
+            "--verbose", "-v", action="store_true", help="Verbose logging"
+        )
 
         args = parser.parse_args(args)
         setup_logging(args.verbose)
