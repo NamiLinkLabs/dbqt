@@ -120,7 +120,9 @@ def main():
         print(f"Error importing tool '{tool_name}': {e}")
         sys.exit(1)
     except Exception as e:
+        import traceback
         print(f"Error running tool '{tool_name}': {e}")
+        traceback.print_exc()
         sys.exit(1)
 
 
