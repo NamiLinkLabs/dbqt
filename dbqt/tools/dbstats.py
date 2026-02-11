@@ -4,7 +4,16 @@ import polars as pl
 import logging
 import threading
 
-from dbqt.tools.utils import load_config, ConnectionPool, setup_logging, Timer
+from dbqt.tools.utils import (
+    load_config,
+    ConnectionPool,
+    setup_logging,
+    Timer,
+    _read_table_lists,
+    get_metadata_for_table,
+    metadata_to_df,
+    fetch_metadata_parallel,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,22 +40,6 @@ def _load_configs(config_path, source_config_path, target_config_path):
             "Either config_path or both source/target config paths must be provided"
         )
     return source_config, target_config, tables_file, max_workers
-
-
-def _read_table_lists(tables_file):
-    """Read the tables CSV and return (df, source_tables, target_tables).
-
-    Returns target_tables=None when the CSV uses a single 'table_name' column.
-    """
-    df = pl.read_csv(tables_file)
-    if "source_table" in df.columns and "target_table" in df.columns:
-        return df, df["source_table"].to_list(), df["target_table"].to_list()
-    elif "table_name" in df.columns:
-        return df, df["table_name"].to_list(), None
-    else:
-        raise ValueError(
-            "CSV must contain 'table_name' or 'source_table'/'target_table' columns."
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -151,67 +144,6 @@ def get_table_stats(
 
         df.write_csv(tables_file)
         logger.info(f"Updated row counts in {tables_file}")
-
-
-# ---------------------------------------------------------------------------
-# Metadata retrieval (shared with colcompare)
-# ---------------------------------------------------------------------------
-
-
-def get_metadata_for_table(connector, table_name, prefix=""):
-    """Fetch column metadata for a single table via fetch_table_metadata."""
-    threading.current_thread().name = f"Meta-{prefix}{table_name}"
-    try:
-        metadata = connector.fetch_table_metadata(table_name)
-        logger.info(f"Table {prefix}{table_name}: {len(metadata)} columns")
-        return table_name, (metadata, None)
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"Error getting metadata for {prefix}{table_name}: {error_msg}")
-        return table_name, (None, error_msg)
-
-
-def metadata_to_df(results, table_names):
-    """Convert metadata results dict into a Polars DataFrame."""
-    rows = []
-    for table_name in table_names:
-        metadata, error = results[table_name]
-        if metadata is None:
-            continue
-        for col_row in metadata:
-            rows.append(
-                {
-                    "SCH_TABLE": table_name,
-                    "COL_NAME": str(col_row[0]).upper(),
-                    "DATA_TYPE": str(col_row[1]).upper() if col_row[1] else "N/A",
-                    "DATETIME_PRECISION": col_row[2] if len(col_row) > 2 else None,
-                    "NUMERIC_PRECISION": col_row[3] if len(col_row) > 3 else None,
-                    "NUMERIC_SCALE": col_row[4] if len(col_row) > 4 else None,
-                }
-            )
-    if not rows:
-        return pl.DataFrame(
-            schema={
-                "SCH_TABLE": pl.Utf8,
-                "COL_NAME": pl.Utf8,
-                "DATA_TYPE": pl.Utf8,
-                "DATETIME_PRECISION": pl.Int64,
-                "NUMERIC_PRECISION": pl.Int64,
-                "NUMERIC_SCALE": pl.Int64,
-            }
-        )
-    return pl.DataFrame(rows)
-
-
-def fetch_metadata_parallel(config, table_names, prefix="", max_workers=4):
-    """Fetch metadata for many tables in parallel, return a Polars DataFrame."""
-    workers = min(max_workers, len(table_names))
-    with ConnectionPool(config, workers) as pool:
-        results = pool.execute_parallel(
-            lambda c, t: get_metadata_for_table(c, t, prefix),
-            table_names,
-        )
-    return metadata_to_df(results, table_names)
 
 
 # ---------------------------------------------------------------------------

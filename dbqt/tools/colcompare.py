@@ -15,8 +15,13 @@ from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
 
-from dbqt.tools.utils import load_config, setup_logging, Timer
-from dbqt.tools.dbstats import fetch_metadata_parallel, _read_table_lists
+from dbqt.tools.utils import (
+    load_config,
+    setup_logging,
+    Timer,
+    fetch_metadata_parallel,
+    _read_table_lists,
+)
 
 logger = logging.getLogger(__name__)
 
