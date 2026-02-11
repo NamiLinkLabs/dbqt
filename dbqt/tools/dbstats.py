@@ -191,7 +191,14 @@ def get_table_stats(
         if "_discovery_status" in df.columns:
             df = df.drop("_discovery_status")
 
-        output_file = tables_file if tables_file else "dbqt_table_stats.csv"
+        if tables_file:
+            output_file = tables_file
+        else:
+            from dbqt.tools.utils import get_schema_label
+
+            schema_label = get_schema_label(target_config)
+            output_file = f"{schema_label}_row_count.csv"
+
         df.write_csv(output_file)
         logger.info(f"Updated row counts in {output_file}")
 

@@ -168,6 +168,20 @@ def format_runtime(seconds: float) -> str:
         return f"{hours}h {remaining_minutes}m {remaining_seconds:.2f}s"
 
 
+def get_schema_label(config):
+    """Extract a human-readable schema/database label from a YAML config.
+
+    Tries ``schema``, then ``database``, then ``sid``, falling back to
+    ``"default"``.  Used for naming output files during auto-discovery.
+    """
+    conn = config.get("connection", config)
+    for key in ("schema", "database", "sid"):
+        val = conn.get(key)
+        if val:
+            return val
+    return "default"
+
+
 def discover_tables_from_db(config):
     """Connect to a database and list all tables in the configured schema.
 

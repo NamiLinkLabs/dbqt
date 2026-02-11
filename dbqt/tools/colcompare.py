@@ -396,7 +396,13 @@ def colcompare_from_db(source_config_path, target_config_path, type_mappings=Non
         source_df = fetch_all_metadata_as_df(source_config, source_tables)
         target_df = fetch_all_metadata_as_df(target_config, target_tables)
 
-        report_name = Path(tables_file).stem if tables_file else "colcompare_report"
+        if tables_file:
+            report_name = Path(tables_file).stem
+        else:
+            from dbqt.tools.utils import get_schema_label
+
+            schema_label = get_schema_label(target_config)
+            report_name = f"{schema_label}_colcompare_report"
         _run_comparison(source_df, target_df, report_name, type_mappings)
         logger.info("Database column comparison complete")
 
