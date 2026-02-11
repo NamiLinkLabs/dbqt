@@ -207,21 +207,26 @@ def _read_table_lists(tables_file, source_config=None, target_config=None):
     logger.info("No tables_file provided — discovering tables from database schema")
 
     if source_config and target_config and source_config is not target_config:
-        source_tables = discover_tables_from_db(source_config)
-        target_tables = discover_tables_from_db(target_config)
-        df = pl.DataFrame(
-            {
-                "source_table": source_tables,
-                "target_table": target_tables,
-            }
-        ) if len(source_tables) == len(target_tables) else pl.DataFrame(
-            {"table_name": sorted(set(source_tables) | set(target_tables))}
+        source_tables_set = set(discover_tables_from_db(source_config))
+        target_tables_set = set(discover_tables_from_db(target_config))
+        common = sorted(source_tables_set & target_tables_set)
+        source_only = sorted(source_tables_set - target_tables_set)
+        target_only = sorted(target_tables_set - source_tables_set)
+
+        rows = []
+        for t in common:
+            rows.append({"source_table": t, "target_table": t, "_discovery_status": "common"})
+        for t in source_only:
+            rows.append({"source_table": t, "target_table": t, "_discovery_status": "source_only"})
+        for t in target_only:
+            rows.append({"source_table": t, "target_table": t, "_discovery_status": "target_only"})
+
+        df = pl.DataFrame(rows)
+        return (
+            df,
+            df["source_table"].to_list(),
+            df["target_table"].to_list(),
         )
-        if "source_table" in df.columns:
-            return df, source_tables, target_tables
-        else:
-            all_tables = df["table_name"].to_list()
-            return df, all_tables, all_tables
     elif source_config:
         tables = discover_tables_from_db(source_config)
         df = pl.DataFrame({"table_name": tables})

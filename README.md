@@ -205,7 +205,10 @@ The tables.csv file should contain either:
 
 **Auto-discovery:** If `tables_file` is omitted from the YAML config, dbqt will
 automatically discover all tables and views in the configured database schema and
-use those for row counts and/or column comparisons.
+use those for row counts and/or column comparisons. In dual-database mode, only
+tables present in **both** databases will have row counts collected — tables that
+exist in only one side are reported with a note like *"Only in source, row count
+skipped"* since comparing a missing table is not meaningful.
 
 Table names in the CSV support flexible path formats:
 - `my_table` — uses database/schema from YAML config

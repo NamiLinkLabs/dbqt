@@ -76,29 +76,72 @@ def get_table_stats(
 
         if target_tables is not None:
             # source/target mode
-            source_workers = min(max_workers, len(source_tables))
-            target_workers = min(max_workers, len(target_tables))
 
-            with ConnectionPool(source_config, source_workers) as pool:
-                source_results = pool.execute_parallel(
-                    lambda c, t: get_row_count_for_table(c, t, "source:"),
-                    source_tables,
-                )
-            with ConnectionPool(target_config, target_workers) as pool:
-                target_results = pool.execute_parallel(
-                    lambda c, t: get_row_count_for_table(c, t, "target:"),
-                    target_tables,
-                )
+            # Determine which tables to actually count based on discovery status
+            discovery_status = {}
+            if "_discovery_status" in df.columns:
+                for row in df.iter_rows(named=True):
+                    status = row["_discovery_status"]
+                    discovery_status[row["source_table"]] = status
+
+            # Filter to tables that should actually be counted
+            source_tables_to_count = [
+                t for t in source_tables
+                if discovery_status.get(t, "common") in ("common", "source_only_count")
+                and discovery_status.get(t, "common") != "target_only"
+                and discovery_status.get(t, "common") != "source_only"
+            ]
+            target_tables_to_count = [
+                t for t in target_tables
+                if discovery_status.get(t, "common") in ("common", "target_only_count")
+                and discovery_status.get(t, "common") != "source_only"
+                and discovery_status.get(t, "common") != "target_only"
+            ]
+
+            source_results = {}
+            target_results = {}
+
+            if source_tables_to_count:
+                source_workers = min(max_workers, len(source_tables_to_count))
+                with ConnectionPool(source_config, source_workers) as pool:
+                    source_results = pool.execute_parallel(
+                        lambda c, t: get_row_count_for_table(c, t, "source:"),
+                        source_tables_to_count,
+                    )
+
+            if target_tables_to_count:
+                target_workers = min(max_workers, len(target_tables_to_count))
+                with ConnectionPool(target_config, target_workers) as pool:
+                    target_results = pool.execute_parallel(
+                        lambda c, t: get_row_count_for_table(c, t, "target:"),
+                        target_tables_to_count,
+                    )
 
             src_counts, src_notes, tgt_counts, tgt_notes = [], [], [], []
             for t in source_tables:
-                c, e = source_results[t]
-                src_counts.append(c)
-                src_notes.append(e)
+                status = discovery_status.get(t, "common")
+                if status == "source_only":
+                    src_counts.append(None)
+                    src_notes.append("Only in source, row count skipped")
+                elif status == "target_only":
+                    src_counts.append(None)
+                    src_notes.append("Only in target, row count skipped")
+                else:
+                    c, e = source_results[t]
+                    src_counts.append(c)
+                    src_notes.append(e)
             for t in target_tables:
-                c, e = target_results[t]
-                tgt_counts.append(c)
-                tgt_notes.append(e)
+                status = discovery_status.get(t, "common")
+                if status == "target_only":
+                    tgt_counts.append(None)
+                    tgt_notes.append("Only in target, row count skipped")
+                elif status == "source_only":
+                    tgt_counts.append(None)
+                    tgt_notes.append("Only in source, row count skipped")
+                else:
+                    c, e = target_results[t]
+                    tgt_counts.append(c)
+                    tgt_notes.append(e)
 
             df = df.with_columns(
                 pl.Series("source_row_count", src_counts),
@@ -144,8 +187,13 @@ def get_table_stats(
                 pl.Series("notes", notes),
             )
 
-        df.write_csv(tables_file)
-        logger.info(f"Updated row counts in {tables_file}")
+        # Drop internal columns before writing
+        if "_discovery_status" in df.columns:
+            df = df.drop("_discovery_status")
+
+        output_file = tables_file if tables_file else "dbqt_table_stats.csv"
+        df.write_csv(output_file)
+        logger.info(f"Updated row counts in {output_file}")
 
 
 # ---------------------------------------------------------------------------
