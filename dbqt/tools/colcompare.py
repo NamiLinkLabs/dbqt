@@ -400,7 +400,7 @@ To generate a default configuration file:
         parser.add_argument("--output", "-o", default="colcompare_config.yaml",
                             help="Output path for config file (used with --generate-config)")
         parser.add_argument("source", nargs="?", help="Path to the source CSV/Parquet file")
-        parser.add_argument("target", nargs="?", help="Path to the target CSV/Parquet file")
+        parser.add_argument("tt", nargs="?", help="Path to the target CSV/Parquet file")
         parser.add_argument("--source-config", help="YAML config for source database")
         parser.add_argument("--target-config", help="YAML config for target database")
         parser.add_argument("--config", "-c", help="Path to type mappings configuration file")
