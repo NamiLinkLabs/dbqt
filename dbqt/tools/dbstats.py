@@ -149,7 +149,7 @@ def get_table_stats(
                 pl.Series("target_notes", tgt_notes),
             )
 
-            # Reorder columns
+            # Reorder columns so counts appear next to their table columns
             cols = df.columns
             for col_name, anchor, offset in [
                 ("source_row_count", "source_table", 1),
@@ -157,8 +157,9 @@ def get_table_stats(
                 ("target_row_count", "target_table", 1),
                 ("target_notes", "target_table", 2),
             ]:
-                cols.pop(cols.index(col_name))
-                cols.insert(cols.index(anchor) + offset, col_name)
+                if col_name in cols and anchor in cols:
+                    cols.pop(cols.index(col_name))
+                    cols.insert(cols.index(anchor) + offset, col_name)
             df = df.select(cols)
 
             df = df.with_columns(
