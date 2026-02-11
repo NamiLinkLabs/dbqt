@@ -4,12 +4,15 @@ DBQT is a lightweight, Python-first data quality testing framework that helps da
 
 ## 🛠️ Current Tools
 
-### Column Comparison Tool (dbqt compare)
+### Column Comparison Tool (dbqt colcompare / dbqt compare)
 Compare schemas between databases or files:
 - Table-level comparison
 - Column-level comparison with data type compatibility checks
 - Support for CSV and Parquet files
 - Handles nested Parquet schemas (arrays, structs, maps)
+- **Database-backed comparison** — fetch metadata directly from source/target databases
+- Retrieves precision information (datetime, numeric precision, numeric scale)
+- Supports `table`, `schema.table`, and `db.schema.table` patterns in CSV files
 - Intelligent data type compatibility checking
 - **Customizable type mappings via YAML configuration**
 - Generates detailed Excel report with:
@@ -20,20 +23,26 @@ Compare schemas between databases or files:
 
 Usage:
 ```bash
-# Basic comparison
-dbqt compare source_schema.csv target_schema.csv
+# Basic file-based comparison
+dbqt colcompare source_schema.csv target_schema.csv
 
 # Compare Parquet files directly
-dbqt compare source.parquet target.parquet
+dbqt colcompare source.parquet target.parquet
+
+# Database-backed comparison (fetches metadata from live databases)
+dbqt colcompare --source-config source_config.yaml --target-config target_config.yaml
 
 # Generate a default type mappings configuration file
-dbqt compare --generate-config
+dbqt colcompare --generate-config
 
 # Generate config with custom output path
-dbqt compare --generate-config --output my_types.yaml
+dbqt colcompare --generate-config --output my_types.yaml
 
 # Use custom type mappings for comparison
-dbqt compare source.csv target.csv --config my_types.yaml
+dbqt colcompare source.csv target.csv --config my_types.yaml
+
+# Also available via alias
+dbqt compare source.csv target.csv
 ```
 
 **Customizing Type Mappings:**
@@ -96,22 +105,35 @@ Usage:
 dbqt combine [output.parquet]  # Combines all .parquet files in current directory
 ```
 
-### Database Statistics Tool (dbqt dbstats)
-Collect and analyze database statistics:
-- Fetches table row counts in parallel for faster execution
+### Database Statistics Tool (dbqt dbstats / dbqt rowcount / dbqt stats)
+Collect and analyze database statistics with multiple modes:
+- **rowcount** (default) — Fetches table row counts in parallel
+- **colcompare** — Compares column schemas between source and target databases
+- **both** — Runs row counts then column comparison in one command
 - Supports both single table analysis and source/target table comparisons
-- **NEW: Supports separate source and target database configurations** for cross-database comparisons
+- Supports separate source and target database configurations for cross-database comparisons
+- Supports `table`, `schema.table`, and `db.schema.table` patterns in CSV files
 - Automatically calculates differences and percentage changes for comparisons
 - Updates statistics in a CSV file with comprehensive error reporting
 - Configurable through YAML
 
 Usage:
 ```bash
-# Single database mode (source and target in same database)
+# Row counts — single database mode
 dbqt dbstats --config config.yaml
 
-# Dual database mode (source and target in different databases)
+# Row counts — dual database mode (source and target in different databases)
 dbqt dbstats --source-config source_config.yaml --target-config target_config.yaml
+
+# Column comparison via dbstats
+dbqt dbstats colcompare --source-config source_config.yaml --target-config target_config.yaml
+
+# Both row counts and column comparison in one run
+dbqt dbstats both --source-config source_config.yaml --target-config target_config.yaml
+
+# Also available via aliases
+dbqt rowcount --config config.yaml
+dbqt stats --config config.yaml
 ```
 
 Example config.yaml (single database mode):
@@ -177,6 +199,11 @@ connection:
 The tables.csv file should contain either:
 - A `table_name` column for single table analysis (adds `row_count` and `notes` columns)
 - `source_table` and `target_table` columns for comparison analysis (adds row counts, notes, difference, and percentage difference columns)
+
+Table names in the CSV support flexible path formats:
+- `my_table` — uses database/schema from YAML config
+- `my_schema.my_table` — overrides schema, uses database from config
+- `my_db.my_schema.my_table` — fully qualified, ignores config defaults
 
 **Note:** When using dual database mode (`--source-config` and `--target-config`), the tool will:
 - Connect to the source database to count rows in `source_table` column
