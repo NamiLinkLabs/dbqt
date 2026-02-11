@@ -33,7 +33,7 @@ def _load_configs(config_path, source_config_path, target_config_path):
     elif config_path:
         config = load_config(config_path)
         source_config = target_config = config
-        tables_file = config["tables_file"]
+        tables_file = config.get("tables_file")
         max_workers = config.get("max_workers", 4)
     else:
         raise ValueError(
@@ -70,7 +70,9 @@ def get_table_stats(
         source_config, target_config, tables_file, max_workers = _load_configs(
             config_path, source_config_path, target_config_path
         )
-        df, source_tables, target_tables = _read_table_lists(tables_file)
+        df, source_tables, target_tables = _read_table_lists(
+            tables_file, source_config, target_config
+        )
 
         if target_tables is not None:
             # source/target mode

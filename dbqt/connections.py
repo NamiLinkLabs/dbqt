@@ -103,6 +103,24 @@ class DBConnector(ABC):
             self.logger.error(f"Error counting rows for {table_name}: {str(e)}")
             return None
 
+    def list_tables(self, schema=None):
+        """List all tables and views in the given schema (or config default)."""
+        schema = schema or self.config.get("schema")
+        if not schema:
+            raise ValueError(
+                "Cannot discover tables: no schema specified in config or argument"
+            )
+        query = (
+            "SELECT table_name FROM information_schema.tables"
+            f" WHERE upper(table_schema) = upper('{schema}')"
+            " ORDER BY table_name"
+        )
+        self.logger.info(f"Discovering tables in schema: {schema}")
+        result = self.run_query(query)
+        tables = [row[0] for row in result]
+        self.logger.info(f"Found {len(tables)} tables in schema {schema}")
+        return tables
+
     def generate_table_from_query(self, table_name, query):
         self.logger.info(f"Generating table {table_name}")
         self.run_query(f"DROP TABLE IF EXISTS {table_name}")
@@ -111,6 +129,21 @@ class DBConnector(ABC):
 
 
 class MySQL(DBConnector):
+    def list_tables(self, schema=None):
+        schema = schema or self.config.get("database")
+        if not schema:
+            raise ValueError("Cannot discover tables: no database specified in config")
+        query = (
+            "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES"
+            f" WHERE UPPER(TABLE_SCHEMA) = UPPER('{schema}')"
+            " ORDER BY TABLE_NAME"
+        )
+        self.logger.info(f"Discovering tables in database: {schema}")
+        result = self.run_query(query)
+        tables = [row[0] for row in result]
+        self.logger.info(f"Found {len(tables)} tables in database {schema}")
+        return tables
+
     @property
     def connection_details(self):
         conn_str = f"mysql://{self.config['user']}:{self.config['password']}@{self.config['host']}:{self.config.get('port', '3306')}/{self.config.get('database', 'information_schema')}"
@@ -133,6 +166,21 @@ class MySQL(DBConnector):
 
 
 class Snowflake(DBConnector):
+    def list_tables(self, schema=None):
+        catalog = self.config.get("database", "")
+        schema = schema or self.config.get("schema", "")
+        query = (
+            "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES"
+            f" WHERE UPPER(TABLE_CATALOG) = UPPER('{catalog}')"
+            f" AND UPPER(TABLE_SCHEMA) = UPPER('{schema}')"
+            " ORDER BY TABLE_NAME"
+        )
+        self.logger.info(f"Discovering tables in {catalog}.{schema}")
+        result = self.run_query(query)
+        tables = [row[0] for row in result]
+        self.logger.info(f"Found {len(tables)} tables in {catalog}.{schema}")
+        return tables
+
     @property
     def connection_details(self):
         auth = (
@@ -301,6 +349,19 @@ class PostgreSQL(DBConnector):
 
 
 class SQLServer(DBConnector):
+    def list_tables(self, schema=None):
+        schema = schema or self.config.get("schema", "dbo")
+        query = (
+            "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES"
+            f" WHERE UPPER(TABLE_SCHEMA) = UPPER('{schema}')"
+            " ORDER BY TABLE_NAME"
+        )
+        self.logger.info(f"Discovering tables in schema: {schema}")
+        result = self.run_query(query)
+        tables = [row[0] for row in result]
+        self.logger.info(f"Found {len(tables)} tables in schema {schema}")
+        return tables
+
     @property
     def connection_details(self):
         # Build connection string for SQL Server / Azure Synapse
@@ -346,6 +407,22 @@ class SQLServer(DBConnector):
 
 
 class Oracle(DBConnector):
+    def list_tables(self, schema=None):
+        schema = schema or self.config.get("schema", self.config["user"].upper())
+        query = (
+            "SELECT TABLE_NAME FROM ALL_TABLES"
+            f" WHERE UPPER(OWNER) = UPPER('{schema}')"
+            " UNION"
+            " SELECT VIEW_NAME AS TABLE_NAME FROM ALL_VIEWS"
+            f" WHERE UPPER(OWNER) = UPPER('{schema}')"
+            " ORDER BY TABLE_NAME"
+        )
+        self.logger.info(f"Discovering tables in schema: {schema}")
+        result = self.run_query(query)
+        tables = [row[0] for row in result]
+        self.logger.info(f"Found {len(tables)} tables in schema {schema}")
+        return tables
+
     def __init__(self, config):
         super().__init__(config)
         self.jdbc_driver = config.get("jdbc_driver", "oracle.jdbc.OracleDriver")
@@ -453,6 +530,18 @@ class Oracle(DBConnector):
 
 
 class Athena(DBConnector):
+    def list_tables(self, schema=None):
+        database = schema or self.config.get("database")
+        if not database:
+            raise ValueError("Cannot discover tables: no database specified in config")
+        query = f"SHOW TABLES IN {database}"
+        self.logger.info(f"Discovering tables in database: {database}")
+        result = self.run_query(query)
+        # Athena SHOW TABLES returns rows with header; skip first row
+        tables = [row[0] for row in result[1:] if row[0]]
+        self.logger.info(f"Found {len(tables)} tables in database {database}")
+        return tables
+
     def __init__(self, config):
         super().__init__(config)
         self.session = boto3.Session(profile_name=config.get("aws_profile", "default"))

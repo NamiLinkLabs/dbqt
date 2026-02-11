@@ -21,6 +21,7 @@ from dbqt.tools.utils import (
     Timer,
     fetch_metadata_parallel,
     _read_table_lists,
+    discover_tables_from_db,
 )
 
 logger = logging.getLogger(__name__)
@@ -359,12 +360,10 @@ def colcompare_from_db(source_config_path, target_config_path, type_mappings=Non
         target_config = load_config(target_config_path)
 
         tables_file = source_config.get("tables_file") or target_config.get("tables_file")
-        if not tables_file:
-            logger.error("tables_file must be specified in at least one config")
-            return
-
         max_workers = source_config.get("max_workers", 4)
-        df, source_tables, target_tables = _read_table_lists(tables_file)
+        df, source_tables, target_tables = _read_table_lists(
+            tables_file, source_config, target_config
+        )
 
         if target_tables is None:
             target_tables = source_tables

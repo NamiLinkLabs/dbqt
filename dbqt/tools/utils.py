@@ -168,21 +168,67 @@ def format_runtime(seconds: float) -> str:
         return f"{hours}h {remaining_minutes}m {remaining_seconds:.2f}s"
 
 
-def _read_table_lists(tables_file):
+def discover_tables_from_db(config):
+    """Connect to a database and list all tables in the configured schema.
+
+    Returns a list of table name strings.
+    """
+    connector = create_connector(config["connection"])
+    connector.connect()
+    try:
+        tables = connector.list_tables()
+    finally:
+        connector.disconnect()
+    return tables
+
+
+def _read_table_lists(tables_file, source_config=None, target_config=None):
     """Read the tables CSV and return (df, source_tables, target_tables).
 
-    Returns target_tables=None when the CSV uses a single 'table_name' column.
+    If *tables_file* is ``None``, tables are auto-discovered from the database
+    schema defined in the YAML config(s).
+
+    Returns target_tables=None when operating in single-config mode.
     """
     import polars as pl
 
-    df = pl.read_csv(tables_file)
-    if "source_table" in df.columns and "target_table" in df.columns:
-        return df, df["source_table"].to_list(), df["target_table"].to_list()
-    elif "table_name" in df.columns:
-        return df, df["table_name"].to_list(), None
+    if tables_file is not None:
+        df = pl.read_csv(tables_file)
+        if "source_table" in df.columns and "target_table" in df.columns:
+            return df, df["source_table"].to_list(), df["target_table"].to_list()
+        elif "table_name" in df.columns:
+            return df, df["table_name"].to_list(), None
+        else:
+            raise ValueError(
+                "CSV must contain 'table_name' or 'source_table'/'target_table' columns."
+            )
+
+    # Auto-discover tables from database(s)
+    logger.info("No tables_file provided — discovering tables from database schema")
+
+    if source_config and target_config and source_config is not target_config:
+        source_tables = discover_tables_from_db(source_config)
+        target_tables = discover_tables_from_db(target_config)
+        df = pl.DataFrame(
+            {
+                "source_table": source_tables,
+                "target_table": target_tables,
+            }
+        ) if len(source_tables) == len(target_tables) else pl.DataFrame(
+            {"table_name": sorted(set(source_tables) | set(target_tables))}
+        )
+        if "source_table" in df.columns:
+            return df, source_tables, target_tables
+        else:
+            all_tables = df["table_name"].to_list()
+            return df, all_tables, all_tables
+    elif source_config:
+        tables = discover_tables_from_db(source_config)
+        df = pl.DataFrame({"table_name": tables})
+        return df, tables, None
     else:
         raise ValueError(
-            "CSV must contain 'table_name' or 'source_table'/'target_table' columns."
+            "Cannot discover tables: no config provided and no tables_file specified"
         )
 
 

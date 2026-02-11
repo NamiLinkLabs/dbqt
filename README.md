@@ -203,6 +203,10 @@ The tables.csv file should contain either:
 - A `table_name` column for single table analysis (adds `row_count` and `notes` columns)
 - `source_table` and `target_table` columns for comparison analysis (adds row counts, notes, difference, and percentage difference columns)
 
+**Auto-discovery:** If `tables_file` is omitted from the YAML config, dbqt will
+automatically discover all tables and views in the configured database schema and
+use those for row counts and/or column comparisons.
+
 Table names in the CSV support flexible path formats:
 - `my_table` — uses database/schema from YAML config
 - `my_schema.my_table` — overrides schema, uses database from config
