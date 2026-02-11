@@ -12,7 +12,6 @@ from dbqt.tools.utils import (
     _read_table_lists,
     get_metadata_for_table,
     metadata_to_df,
-    fetch_metadata_parallel,
 )
 
 logger = logging.getLogger(__name__)
