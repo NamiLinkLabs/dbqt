@@ -153,6 +153,7 @@ def get_table_stats(
 
 def main(args=None):
     import argparse
+    from dbqt.tools.colcompare import generate_config_file, colcompare_from_db, load_type_mappings
 
     parser = argparse.ArgumentParser(
         description="Database statistics: row counts and/or column comparison",
@@ -200,8 +201,6 @@ Examples:
     setup_logging(args.verbose)
 
     if args.generate_config:
-        from dbqt.tools.colcompare import generate_config_file
-
         generate_config_file(args.output)
         return
 
@@ -221,8 +220,6 @@ Examples:
             )
 
     if mode in ("colcompare", "both"):
-        from dbqt.tools.colcompare import colcompare_from_db, load_type_mappings
-
         type_mappings = load_type_mappings(args.type_config)
         if args.source_config and args.target_config:
             colcompare_from_db(args.source_config, args.target_config, type_mappings)
