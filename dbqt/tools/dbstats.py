@@ -200,6 +200,8 @@ Examples:
     setup_logging(args.verbose)
 
     if args.generate_config:
+        from dbqt.tools.colcompare import generate_config_file
+
         generate_config_file(args.output)
         return
 
