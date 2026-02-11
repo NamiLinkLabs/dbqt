@@ -179,6 +179,17 @@ Examples:
     parser.add_argument("--config", help="YAML config (used as both source and target)")
     parser.add_argument("--source-config", help="YAML config for source database")
     parser.add_argument("--target-config", help="YAML config for target database")
+    parser.add_argument("--type-config", help="Path to type mappings config file (colcompare mode)")
+    parser.add_argument(
+        "--generate-config",
+        action="store_true",
+        help="Generate a default type mappings configuration file",
+    )
+    parser.add_argument(
+        "--output", "-o",
+        default="colcompare_config.yaml",
+        help="Output path for generated config file",
+    )
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
 
     if args is None:
@@ -187,6 +198,10 @@ Examples:
         args = parser.parse_args(args)
 
     setup_logging(args.verbose)
+
+    if args.generate_config:
+        generate_config_file(args.output)
+        return
 
     mode = args.mode
 
@@ -204,13 +219,13 @@ Examples:
             )
 
     if mode in ("colcompare", "both"):
-        # Delegate to colcompare module to avoid circular imports
-        from dbqt.tools.colcompare import colcompare_from_db
+        from dbqt.tools.colcompare import colcompare_from_db, load_type_mappings
 
+        type_mappings = load_type_mappings(args.type_config)
         if args.source_config and args.target_config:
-            colcompare_from_db(args.source_config, args.target_config)
+            colcompare_from_db(args.source_config, args.target_config, type_mappings)
         elif args.config:
-            colcompare_from_db(args.config, args.config)
+            colcompare_from_db(args.config, args.config, type_mappings)
         else:
             parser.error(
                 "Either --config or both --source-config and --target-config required"
