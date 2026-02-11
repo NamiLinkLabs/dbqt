@@ -14,6 +14,26 @@ from reladiff import connect as reladiff_connect
 logger = logging.getLogger(__name__)
 
 
+def _normalize_table_path(table_name, config=None):
+    """Resolve table_name into (database, schema, table) using config defaults."""
+    if config is None:
+        config = {}
+    parts = table_name.split(".")
+    default_db = config.get("database") or config.get("sid")
+    default_schema = config.get("schema")
+    if len(parts) == 3:
+        return parts[0], parts[1], parts[2]
+    elif len(parts) == 2:
+        return default_db, parts[0], parts[1]
+    else:
+        return default_db, default_schema, parts[0]
+
+
+def _qualified_name(database, schema, table_name):
+    """Build a dot-separated qualified name, skipping None components."""
+    return ".".join(p for p in (database, schema, table_name) if p)
+
+
 class DBConnector(ABC):
     def __init__(self, config):
         self.config = config
@@ -43,15 +63,19 @@ class DBConnector(ABC):
         return result
 
     def fetch_table_metadata(self, table_name):
-        query = f"""
-        SELECT column_name, data_type
-        FROM information_schema.columns
-        WHERE upper(table_name) = upper('{table_name}')
-        ORDER BY ordinal_position
-        """
+        db, schema, tbl = _normalize_table_path(table_name, self.config)
+        where_parts = [f"upper(table_name) = upper('{tbl}')"]
+        if schema:
+            where_parts.append(f"upper(table_schema) = upper('{schema}')")
+        query = (
+            "SELECT column_name, data_type, datetime_precision, numeric_precision, numeric_scale"
+            " FROM information_schema.columns"
+            f" WHERE {' AND '.join(where_parts)}"
+            " ORDER BY ordinal_position"
+        )
         self.logger.info(f"Fetching metadata for table: {table_name}")
         result = self.run_query(query)
-        return [(row[0], row[1]) for row in result]
+        return [(row[0], row[1], row[2], row[3], row[4]) for row in result]
 
     def retrieve_table(self, table_name):
         return table(table_name)
@@ -62,12 +86,15 @@ class DBConnector(ABC):
                 col[0].upper(): col[1] for col in self.fetch_table_metadata(table_name)
             }
         except Exception as e:
-            print(f"Error retrieving source table metadata: {str(e)}")
+            self.logger.error(f"Error retrieving source table metadata: {str(e)}")
+            return {}
 
     def count_rows(self, table_name, where_clause=None):
         """Retrieve the total number of rows in a table."""
         try:
-            query = f"SELECT COUNT(*) FROM {table_name}"
+            db, schema, tbl = _normalize_table_path(table_name, self.config)
+            qualified = _qualified_name(db, schema, tbl)
+            query = f"SELECT COUNT(*) FROM {qualified}"
             if where_clause:
                 query += f" WHERE {where_clause}"
             result = self.run_query(query)
@@ -90,16 +117,19 @@ class MySQL(DBConnector):
         return conn_str
 
     def fetch_table_metadata(self, table_name):
+        db, schema, tbl = _normalize_table_path(table_name, self.config)
+        db_filter = schema or self.config.get("database", "")
         query = f"""
-        SELECT UPPER(COLUMN_NAME) AS COLUMN_NAME, DATA_TYPE
+        SELECT UPPER(COLUMN_NAME) AS COLUMN_NAME, DATA_TYPE,
+               DATETIME_PRECISION, NUMERIC_PRECISION, NUMERIC_SCALE
         FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE UPPER(TABLE_SCHEMA) = UPPER('{self.config['database']}') 
-        AND UPPER(TABLE_NAME) = UPPER('{table_name}')
+        WHERE UPPER(TABLE_SCHEMA) = UPPER('{db_filter}') 
+        AND UPPER(TABLE_NAME) = UPPER('{tbl}')
         ORDER BY ORDINAL_POSITION
         """
         self.logger.info(f"Fetching metadata for table: {table_name}")
         result = self.run_query(query)
-        return [(row[0], row[1]) for row in result]
+        return [(row[0], row[1], row[2], row[3], row[4]) for row in result]
 
 
 class Snowflake(DBConnector):
@@ -114,18 +144,22 @@ class Snowflake(DBConnector):
         return conn_str
 
     def fetch_table_metadata(self, table_name):
+        db, schema, tbl = _normalize_table_path(table_name, self.config)
+        catalog = db or self.config.get("database", "")
+        schema = schema or self.config.get("schema", "")
         query = f"""
-        SELECT UPPER(COLUMN_NAME) AS COLUMN_NAME, DATA_TYPE
+        SELECT UPPER(COLUMN_NAME) AS COLUMN_NAME, DATA_TYPE,
+               DATETIME_PRECISION, NUMERIC_PRECISION, NUMERIC_SCALE
         FROM INFORMATION_SCHEMA.COLUMNS
         WHERE 
-        UPPER(TABLE_CATALOG) = UPPER('{self.config['database']}') 
-        AND UPPER(TABLE_SCHEMA) = UPPER('{self.config['schema']}') 
-        AND UPPER(TABLE_NAME) = UPPER('{table_name}')
+        UPPER(TABLE_CATALOG) = UPPER('{catalog}') 
+        AND UPPER(TABLE_SCHEMA) = UPPER('{schema}') 
+        AND UPPER(TABLE_NAME) = UPPER('{tbl}')
         ORDER BY ORDINAL_POSITION
         """
         self.logger.info(f"Fetching metadata for table: {table_name}")
         result = self.run_query(query)
-        return [(row[0], row[1]) for row in result]
+        return [(row[0], row[1], row[2], row[3], row[4]) for row in result]
 
 
 class DuckDB(DBConnector):
@@ -296,23 +330,19 @@ class SQLServer(DBConnector):
         return result if result else "Success"
 
     def fetch_table_metadata(self, table_name):
-        # Handle schema.table format
-        if "." in table_name:
-            schema, table = table_name.split(".", 1)
-        else:
-            schema = self.config.get("schema", "dbo")
-            table = table_name
-
+        db, schema, tbl = _normalize_table_path(table_name, self.config)
+        schema = schema or self.config.get("schema", "dbo")
         query = f"""
-        SELECT UPPER(COLUMN_NAME) AS COLUMN_NAME, DATA_TYPE
+        SELECT UPPER(COLUMN_NAME) AS COLUMN_NAME, DATA_TYPE,
+               DATETIME_PRECISION, NUMERIC_PRECISION, NUMERIC_SCALE
         FROM INFORMATION_SCHEMA.COLUMNS
         WHERE UPPER(TABLE_SCHEMA) = UPPER('{schema}') 
-        AND UPPER(TABLE_NAME) = UPPER('{table}')
+        AND UPPER(TABLE_NAME) = UPPER('{tbl}')
         ORDER BY ORDINAL_POSITION
         """
-        self.logger.info(f"Fetching metadata for table: {schema}.{table}")
+        self.logger.info(f"Fetching metadata for table: {schema}.{tbl}")
         result = self.run_query(query)
-        return [(row[0], row[1]) for row in result]
+        return [(row[0], row[1], row[2], row[3], row[4]) for row in result]
 
 
 class Oracle(DBConnector):
@@ -406,23 +436,20 @@ class Oracle(DBConnector):
         return result if result else "Success"
 
     def fetch_table_metadata(self, table_name):
-        # Handle schema.table format
-        if "." in table_name:
-            schema, table = table_name.split(".", 1)
-        else:
-            schema = self.config.get("schema", self.config["user"].upper())
-            table = table_name
-
+        db, schema, tbl = _normalize_table_path(table_name, self.config)
+        schema = schema or self.config.get("schema", self.config["user"].upper())
         query = f"""
-        SELECT UPPER(COLUMN_NAME) AS COLUMN_NAME, DATA_TYPE
+        SELECT UPPER(COLUMN_NAME) AS COLUMN_NAME, DATA_TYPE,
+               6 AS DATETIME_PRECISION, DATA_PRECISION AS NUMERIC_PRECISION,
+               DATA_SCALE AS NUMERIC_SCALE
         FROM ALL_TAB_COLUMNS
         WHERE UPPER(OWNER) = UPPER('{schema}') 
-        AND UPPER(TABLE_NAME) = UPPER('{table}')
+        AND UPPER(TABLE_NAME) = UPPER('{tbl}')
         ORDER BY COLUMN_ID
         """
-        self.logger.info(f"Fetching metadata for table: {schema}.{table}")
+        self.logger.info(f"Fetching metadata for table: {schema}.{tbl}")
         result = self.run_query(query)
-        return [(row[0], row[1]) for row in result]
+        return [(row[0], row[1], row[2], row[3], row[4]) for row in result]
 
 
 class Athena(DBConnector):
