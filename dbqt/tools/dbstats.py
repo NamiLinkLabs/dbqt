@@ -1,16 +1,62 @@
+"""Database statistics tool — row counts with optional column comparison."""
+
 import polars as pl
 import logging
 import threading
+
 from dbqt.tools.utils import load_config, ConnectionPool, setup_logging, Timer
 
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+
+def _load_configs(config_path, source_config_path, target_config_path):
+    """Return (source_config, target_config, tables_file, max_workers)."""
+    if source_config_path and target_config_path:
+        source_config = load_config(source_config_path)
+        target_config = load_config(target_config_path)
+        tables_file = source_config.get("tables_file") or target_config.get("tables_file")
+        max_workers = source_config.get("max_workers", 4)
+    elif config_path:
+        config = load_config(config_path)
+        source_config = target_config = config
+        tables_file = config["tables_file"]
+        max_workers = config.get("max_workers", 4)
+    else:
+        raise ValueError(
+            "Either config_path or both source/target config paths must be provided"
+        )
+    return source_config, target_config, tables_file, max_workers
+
+
+def _read_table_lists(tables_file):
+    """Read the tables CSV and return (df, source_tables, target_tables).
+
+    Returns target_tables=None when the CSV uses a single 'table_name' column.
+    """
+    df = pl.read_csv(tables_file)
+    if "source_table" in df.columns and "target_table" in df.columns:
+        return df, df["source_table"].to_list(), df["target_table"].to_list()
+    elif "table_name" in df.columns:
+        return df, df["table_name"].to_list(), None
+    else:
+        raise ValueError(
+            "CSV must contain 'table_name' or 'source_table'/'target_table' columns."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Row-count functionality
+# ---------------------------------------------------------------------------
+
+
 def get_row_count_for_table(connector, table_name, prefix=""):
     """Get row count for a single table using a shared connector."""
-    # Set a more descriptive thread name
     threading.current_thread().name = f"Table-{prefix}{table_name}"
-
     try:
         count = connector.count_rows(table_name)
         logger.info(f"Table {prefix}{table_name}: {count} rows")
@@ -22,165 +68,185 @@ def get_row_count_for_table(connector, table_name, prefix=""):
 
 
 def get_table_stats(
-    config_path: str, source_config_path: str = None, target_config_path: str = None
+    config_path: str = None,
+    source_config_path: str = None,
+    target_config_path: str = None,
 ):
+    """Collect row counts for tables listed in a CSV file."""
     with Timer("Database statistics collection"):
-        # Load config(s)
-        if source_config_path and target_config_path:
-            # Two separate configs for source and target
-            source_config = load_config(source_config_path)
-            target_config = load_config(target_config_path)
-            # Use tables_file from source config (or target if not in source)
-            tables_file = source_config.get("tables_file") or target_config.get(
-                "tables_file"
-            )
-            max_workers = source_config.get("max_workers", 4)
-        else:
-            # Single config for both source and target
-            config = load_config(config_path)
-            source_config = target_config = config
-            tables_file = config["tables_file"]
-            max_workers = config.get("max_workers", 4)
+        source_config, target_config, tables_file, max_workers = _load_configs(
+            config_path, source_config_path, target_config_path
+        )
+        df, source_tables, target_tables = _read_table_lists(tables_file)
 
-        # Read tables CSV using polars
-        df = pl.read_csv(tables_file)
-
-        if "source_table" in df.columns and "target_table" in df.columns:
-            source_tables = df["source_table"].to_list()
-            target_tables = df["target_table"].to_list()
-
-            # Limit workers to number of tables to avoid creating unnecessary connections
+        if target_tables is not None:
+            # source/target mode
             source_workers = min(max_workers, len(source_tables))
             target_workers = min(max_workers, len(target_tables))
 
-            # Process source and target tables separately with their respective configs
-            with ConnectionPool(source_config, source_workers) as source_pool:
-                source_results = source_pool.execute_parallel(
-                    lambda connector, table: get_row_count_for_table(
-                        connector, table, "source:"
-                    ),
+            with ConnectionPool(source_config, source_workers) as pool:
+                source_results = pool.execute_parallel(
+                    lambda c, t: get_row_count_for_table(c, t, "source:"),
                     source_tables,
                 )
-
-            with ConnectionPool(target_config, target_workers) as target_pool:
-                target_results = target_pool.execute_parallel(
-                    lambda connector, table: get_row_count_for_table(
-                        connector, table, "target:"
-                    ),
+            with ConnectionPool(target_config, target_workers) as pool:
+                target_results = pool.execute_parallel(
+                    lambda c, t: get_row_count_for_table(c, t, "target:"),
                     target_tables,
                 )
 
-            # Separate row counts and error messages
-            source_row_counts = []
-            source_notes = []
-            target_row_counts = []
-            target_notes = []
-
-            for table in source_tables:
-                count, error = source_results[table]
-                source_row_counts.append(count)
-                source_notes.append(error)
-
-            for table in target_tables:
-                count, error = target_results[table]
-                target_row_counts.append(count)
-                target_notes.append(error)
+            src_counts, src_notes, tgt_counts, tgt_notes = [], [], [], []
+            for t in source_tables:
+                c, e = source_results[t]
+                src_counts.append(c)
+                src_notes.append(e)
+            for t in target_tables:
+                c, e = target_results[t]
+                tgt_counts.append(c)
+                tgt_notes.append(e)
 
             df = df.with_columns(
-                pl.Series("source_row_count", source_row_counts),
-                pl.Series("source_notes", source_notes),
-                pl.Series("target_row_count", target_row_counts),
-                pl.Series("target_notes", target_notes),
+                pl.Series("source_row_count", src_counts),
+                pl.Series("source_notes", src_notes),
+                pl.Series("target_row_count", tgt_counts),
+                pl.Series("target_notes", tgt_notes),
             )
-            cols = df.columns
 
             # Reorder columns
-            source_rc_col = cols.pop(cols.index("source_row_count"))
-            source_notes_col = cols.pop(cols.index("source_notes"))
-            target_rc_col = cols.pop(cols.index("target_row_count"))
-            target_notes_col = cols.pop(cols.index("target_notes"))
-
-            cols.insert(cols.index("source_table") + 1, source_rc_col)
-            cols.insert(cols.index("source_table") + 2, source_notes_col)
-            cols.insert(cols.index("target_table") + 1, target_rc_col)
-            cols.insert(cols.index("target_table") + 2, target_notes_col)
+            cols = df.columns
+            for col_name, anchor, offset in [
+                ("source_row_count", "source_table", 1),
+                ("source_notes", "source_table", 2),
+                ("target_row_count", "target_table", 1),
+                ("target_notes", "target_table", 2),
+            ]:
+                cols.pop(cols.index(col_name))
+                cols.insert(cols.index(anchor) + offset, col_name)
             df = df.select(cols)
 
-            # Add difference and percentage difference columns
             df = df.with_columns(
-                (pl.col("target_row_count") - pl.col("source_row_count")).alias(
-                    "difference"
-                )
+                (pl.col("target_row_count") - pl.col("source_row_count")).alias("difference")
             )
             df = df.with_columns(
                 (((pl.col("difference") / pl.col("source_row_count")) * 100))
                 .fill_nan(0.0)
                 .alias("percentage_difference")
             )
-
-        elif "table_name" in df.columns:
-            table_names = df["table_name"].to_list()
-
-            # Limit workers to number of tables to avoid creating unnecessary connections
-            actual_workers = min(max_workers, len(table_names))
-
-            with ConnectionPool(source_config, actual_workers) as pool:
-                # Execute parallel processing
-                results = pool.execute_parallel(get_row_count_for_table, table_names)
-
-            # Separate row counts and error messages
-            ordered_row_counts = []
-            ordered_notes = []
-
-            for table_name in table_names:
-                count, error = results[table_name]
-                ordered_row_counts.append(count)
-                ordered_notes.append(error)
-
-            # Add row counts and notes to dataframe
-            df = df.with_columns(
-                pl.Series("row_count", ordered_row_counts),
-                pl.Series("notes", ordered_notes),
-            )
         else:
-            logger.error(
-                "CSV file must contain either 'table_name' column or 'source_table' and 'target_table' columns."
+            # single-table mode
+            actual_workers = min(max_workers, len(source_tables))
+            with ConnectionPool(source_config, actual_workers) as pool:
+                results = pool.execute_parallel(get_row_count_for_table, source_tables)
+
+            counts, notes = [], []
+            for t in source_tables:
+                c, e = results[t]
+                counts.append(c)
+                notes.append(e)
+
+            df = df.with_columns(
+                pl.Series("row_count", counts),
+                pl.Series("notes", notes),
             )
-            return
 
         df.write_csv(tables_file)
-
         logger.info(f"Updated row counts in {tables_file}")
+
+
+# ---------------------------------------------------------------------------
+# Metadata retrieval (shared with colcompare)
+# ---------------------------------------------------------------------------
+
+
+def get_metadata_for_table(connector, table_name, prefix=""):
+    """Fetch column metadata for a single table via fetch_table_metadata."""
+    threading.current_thread().name = f"Meta-{prefix}{table_name}"
+    try:
+        metadata = connector.fetch_table_metadata(table_name)
+        logger.info(f"Table {prefix}{table_name}: {len(metadata)} columns")
+        return table_name, (metadata, None)
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Error getting metadata for {prefix}{table_name}: {error_msg}")
+        return table_name, (None, error_msg)
+
+
+def metadata_to_df(results, table_names):
+    """Convert metadata results dict into a Polars DataFrame."""
+    rows = []
+    for table_name in table_names:
+        metadata, error = results[table_name]
+        if metadata is None:
+            continue
+        for col_row in metadata:
+            rows.append(
+                {
+                    "SCH_TABLE": table_name,
+                    "COL_NAME": str(col_row[0]).upper(),
+                    "DATA_TYPE": str(col_row[1]).upper() if col_row[1] else "N/A",
+                    "DATETIME_PRECISION": col_row[2] if len(col_row) > 2 else None,
+                    "NUMERIC_PRECISION": col_row[3] if len(col_row) > 3 else None,
+                    "NUMERIC_SCALE": col_row[4] if len(col_row) > 4 else None,
+                }
+            )
+    if not rows:
+        return pl.DataFrame(
+            schema={
+                "SCH_TABLE": pl.Utf8,
+                "COL_NAME": pl.Utf8,
+                "DATA_TYPE": pl.Utf8,
+                "DATETIME_PRECISION": pl.Int64,
+                "NUMERIC_PRECISION": pl.Int64,
+                "NUMERIC_SCALE": pl.Int64,
+            }
+        )
+    return pl.DataFrame(rows)
+
+
+def fetch_metadata_parallel(config, table_names, prefix="", max_workers=4):
+    """Fetch metadata for many tables in parallel, return a Polars DataFrame."""
+    workers = min(max_workers, len(table_names))
+    with ConnectionPool(config, workers) as pool:
+        results = pool.execute_parallel(
+            lambda c, t: get_metadata_for_table(c, t, prefix),
+            table_names,
+        )
+    return metadata_to_df(results, table_names)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 
 def main(args=None):
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Get row counts for database tables specified in a config file",
+        description="Database statistics: row counts and/or column comparison",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Example config.yaml:
-    connection:
-        type: Snowflake
-        user: myuser
-        password: mypass
-        host: myorg.snowflakecomputing.com
-    tables_file: tables.csv
+Modes:
+  rowcount   - Get row counts for tables (default)
+  colcompare - Compare column schemas between source and target
+  both       - Run row counts then column comparison
+
+Examples:
+  dbqt dbstats --config config.yaml
+  dbqt dbstats colcompare --source-config src.yaml --target-config tgt.yaml
+  dbqt dbstats both --source-config src.yaml --target-config tgt.yaml
         """,
     )
     parser.add_argument(
-        "--config",
-        help="YAML config file containing database connection and tables list (used for both source and target if --source-config and --target-config not provided)",
+        "mode",
+        nargs="?",
+        default="rowcount",
+        choices=["rowcount", "colcompare", "both"],
+        help="Operation mode (default: rowcount)",
     )
-    parser.add_argument(
-        "--source-config",
-        help="YAML config file for source database connection",
-    )
-    parser.add_argument(
-        "--target-config",
-        help="YAML config file for target database connection",
-    )
+    parser.add_argument("--config", help="YAML config (used as both source and target)")
+    parser.add_argument("--source-config", help="YAML config for source database")
+    parser.add_argument("--target-config", help="YAML config for target database")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
 
     if args is None:
@@ -190,17 +256,33 @@ Example config.yaml:
 
     setup_logging(args.verbose)
 
-    # Validate arguments
-    if args.source_config and args.target_config:
-        # Two-config mode
-        get_table_stats(None, args.source_config, args.target_config)
-    elif args.config:
-        # Single-config mode
-        get_table_stats(args.config)
-    else:
-        parser.error(
-            "Either --config or both --source-config and --target-config must be provided"
-        )
+    mode = args.mode
+
+    if mode in ("rowcount", "both"):
+        if args.source_config and args.target_config:
+            get_table_stats(
+                source_config_path=args.source_config,
+                target_config_path=args.target_config,
+            )
+        elif args.config:
+            get_table_stats(config_path=args.config)
+        else:
+            parser.error(
+                "Either --config or both --source-config and --target-config required"
+            )
+
+    if mode in ("colcompare", "both"):
+        # Delegate to colcompare module to avoid circular imports
+        from dbqt.tools.colcompare import colcompare_from_db
+
+        if args.source_config and args.target_config:
+            colcompare_from_db(args.source_config, args.target_config)
+        elif args.config:
+            colcompare_from_db(args.config, args.config)
+        else:
+            parser.error(
+                "Either --config or both --source-config and --target-config required"
+            )
 
 
 if __name__ == "__main__":

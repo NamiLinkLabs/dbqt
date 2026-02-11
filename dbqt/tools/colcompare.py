@@ -1,21 +1,29 @@
+"""Column comparison tool — compare schemas between files or databases."""
+
 import argparse
-import polars as pl
 import re
+import os
+import logging
+from datetime import datetime
+from pathlib import Path
+
+import polars as pl
 import pyarrow
 import pyarrow.parquet as pq
+import yaml
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
-import os
-from datetime import datetime
-from pathlib import Path
-import yaml
-from dbqt.tools.utils import Timer, setup_logging
-import logging
+
+from dbqt.tools.utils import load_config, setup_logging, Timer
+from dbqt.tools.dbstats import fetch_metadata_parallel, _read_table_lists
 
 logger = logging.getLogger(__name__)
 
-# Define default type mappings for equivalent data types
+# ---------------------------------------------------------------------------
+# Type-mapping helpers
+# ---------------------------------------------------------------------------
+
 DEFAULT_TYPE_MAPPINGS = {
     "INTEGER": ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "NUMBER"],
     "VARCHAR": ["VARCHAR", "TEXT", "CHAR", "STRING", "NVARCHAR", "VARCHAR2"],
@@ -28,7 +36,7 @@ DEFAULT_TYPE_MAPPINGS = {
 
 
 def load_type_mappings(config_path=None):
-    """Load type mappings from YAML config file or return defaults"""
+    """Load type mappings from YAML config file or return defaults."""
     if config_path and Path(config_path).exists():
         logger.info(f"Loading type mappings from {config_path}")
         with open(config_path, "r") as f:
@@ -38,7 +46,7 @@ def load_type_mappings(config_path=None):
 
 
 def generate_config_file(output_path="colcompare_config.yaml"):
-    """Generate a default configuration file with type mappings"""
+    """Generate a default configuration file with type mappings."""
     config = {
         "type_mappings": DEFAULT_TYPE_MAPPINGS,
         "description": "Column comparison type mappings configuration. "
@@ -62,25 +70,20 @@ def generate_config_file(output_path="colcompare_config.yaml"):
 
 
 def are_types_compatible(type1, type2, type_mappings=None):
-    """Check if two data types are considered compatible"""
+    """Check if two data types are considered compatible."""
     if type_mappings is None:
         type_mappings = DEFAULT_TYPE_MAPPINGS
 
     type1, type2 = type1.upper(), type2.upper()
-
-    # Strip length specifications like VARCHAR(50) to VARCHAR
     type1 = type1.split("(")[0].strip()
     type2 = type2.split("(")[0].strip()
 
-    # If types are exactly the same, they're compatible
     if type1 == type2:
         return True
 
-    # Special handling for TIMESTAMP variations
     if re.match(r"^TIMESTAMP.*", type1) and re.match(r"^TIMESTAMP.*", type2):
         return True
 
-    # Check if types belong to the same group
     for type_group in type_mappings.values():
         if type1 in type_group and type2 in type_group:
             return True
@@ -88,20 +91,22 @@ def are_types_compatible(type1, type2, type_mappings=None):
     return False
 
 
+# ---------------------------------------------------------------------------
+# Parquet / file-based schema helpers
+# ---------------------------------------------------------------------------
+
+
 def _process_nested_type(field_type, parent_name="", processed_fields=None):
-    """Recursively process nested types in Parquet schema"""
+    """Recursively process nested types in Parquet schema."""
     if processed_fields is None:
         processed_fields = []
 
-    # Handle list types
     if isinstance(field_type, (pyarrow.lib.ListType, pyarrow.lib.LargeListType)):
         element_type = field_type.value_type
         if isinstance(element_type, pyarrow.lib.StructType):
             for nested_field in element_type:
                 full_name = (
-                    f"{parent_name}__{nested_field.name}"
-                    if parent_name
-                    else nested_field.name
+                    f"{parent_name}__{nested_field.name}" if parent_name else nested_field.name
                 )
                 if isinstance(
                     nested_field.type,
@@ -114,19 +119,14 @@ def _process_nested_type(field_type, parent_name="", processed_fields=None):
                 ):
                     _process_nested_type(nested_field.type, full_name, processed_fields)
                 else:
-                    processed_fields.append(
-                        {"col_name": full_name, "type": str(nested_field.type)}
-                    )
+                    processed_fields.append({"col_name": full_name, "type": str(nested_field.type)})
         else:
             processed_fields.append({"col_name": parent_name, "type": str(field_type)})
 
-    # Handle struct types
     elif isinstance(field_type, pyarrow.lib.StructType):
         for nested_field in field_type:
             full_name = (
-                f"{parent_name}__{nested_field.name}"
-                if parent_name
-                else nested_field.name
+                f"{parent_name}__{nested_field.name}" if parent_name else nested_field.name
             )
             if isinstance(
                 nested_field.type,
@@ -139,286 +139,244 @@ def _process_nested_type(field_type, parent_name="", processed_fields=None):
             ):
                 _process_nested_type(nested_field.type, full_name, processed_fields)
             else:
-                processed_fields.append(
-                    {"col_name": full_name, "type": str(nested_field.type)}
-                )
+                processed_fields.append({"col_name": full_name, "type": str(nested_field.type)})
 
-    # Handle map types
     elif isinstance(field_type, pyarrow.lib.MapType):
         processed_fields.append({"col_name": parent_name, "type": str(field_type)})
 
     return processed_fields
 
 
+def _schema_to_df(schema, label="pq"):
+    """Convert a pyarrow schema to a Polars DataFrame with SCH_TABLE/COL_NAME/DATA_TYPE."""
+    fields = []
+    for field in schema:
+        if isinstance(
+            field.type,
+            (
+                pyarrow.lib.ListType,
+                pyarrow.lib.LargeListType,
+                pyarrow.lib.StructType,
+                pyarrow.lib.MapType,
+            ),
+        ):
+            fields.extend(_process_nested_type(field.type, field.name))
+        else:
+            fields.append({"col_name": field.name, "type": str(field.type)})
+
+    return pl.DataFrame(
+        {
+            "SCH_TABLE": [label] * len(fields),
+            "COL_NAME": [f["col_name"] for f in fields],
+            "DATA_TYPE": [f["type"] for f in fields],
+        }
+    )
+
+
 def compare_and_unnest_parquet_schema(source_path, target_path):
-    """Compare schemas of two Parquet files without loading full dataset"""
-    schema1 = pq.read_schema(source_path)
-    schema2 = pq.read_schema(target_path)
-
-    # Process both schemas to expand nested fields
-    processed_fields1 = []
-    processed_fields2 = []
-
-    for field in schema1:
-        if isinstance(
-            field.type,
-            (
-                pyarrow.lib.ListType,
-                pyarrow.lib.LargeListType,
-                pyarrow.lib.StructType,
-                pyarrow.lib.MapType,
-            ),
-        ):
-            processed_fields1.extend(_process_nested_type(field.type, field.name))
-        else:
-            processed_fields1.append({"col_name": field.name, "type": str(field.type)})
-
-    for field in schema2:
-        if isinstance(
-            field.type,
-            (
-                pyarrow.lib.ListType,
-                pyarrow.lib.LargeListType,
-                pyarrow.lib.StructType,
-                pyarrow.lib.MapType,
-            ),
-        ):
-            processed_fields2.extend(_process_nested_type(field.type, field.name))
-        else:
-            processed_fields2.append({"col_name": field.name, "type": str(field.type)})
-
-    # Convert processed fields to polars DataFrame
-    schema1_df = pl.DataFrame(
-        {
-            "SCH_TABLE": ["pq"] * len(processed_fields1),
-            "COL_NAME": [f["col_name"] for f in processed_fields1],
-            "DATA_TYPE": [f["type"] for f in processed_fields1],
-        }
+    """Compare schemas of two Parquet files without loading full dataset."""
+    return (
+        _schema_to_df(pq.read_schema(source_path)),
+        _schema_to_df(pq.read_schema(target_path)),
     )
-
-    schema2_df = pl.DataFrame(
-        {
-            "SCH_TABLE": ["pq"] * len(processed_fields2),
-            "COL_NAME": [f["col_name"] for f in processed_fields2],
-            "DATA_TYPE": [f["type"] for f in processed_fields2],
-        }
-    )
-
-    return schema1_df, schema2_df
 
 
 def read_files(source_path, target_path):
-    """Read source and target files using Polars"""
-    # Check if files are Parquet
+    """Read source and target files using Polars."""
     if source_path.endswith(".parquet") and target_path.endswith(".parquet"):
-        # For Parquet files, only load the schema information
-        source_df, target_df = compare_and_unnest_parquet_schema(
-            source_path, target_path
-        )
-    else:
-        source_df = pl.read_csv(source_path)
-        target_df = pl.read_csv(target_path)
+        return compare_and_unnest_parquet_schema(source_path, target_path)
 
-        # Handle missing DATA_TYPE column
-        if "DATA_TYPE" not in source_df.columns:
-            source_df = source_df.with_columns(pl.lit("N/A").alias("DATA_TYPE"))
-        if "DATA_TYPE" not in target_df.columns:
-            target_df = target_df.with_columns(pl.lit("N/A").alias("DATA_TYPE"))
+    source_df = pl.read_csv(source_path)
+    target_df = pl.read_csv(target_path)
 
-        # Create SCH_TABLE column - concatenate SCH and NAME if SCH exists, otherwise use NAME
-        if "SCH" in source_df.columns:
-            source_df = source_df.with_columns(
-                pl.concat_str([pl.col("SCH"), pl.lit("."), pl.col("TABLE_NAME")]).alias(
-                    "SCH_TABLE"
-                )
+    for df_ref, name in [(source_df, "source"), (target_df, "target")]:
+        if "DATA_TYPE" not in df_ref.columns:
+            df_ref = df_ref.with_columns(pl.lit("N/A").alias("DATA_TYPE"))
+        if name == "source":
+            source_df = df_ref
+        else:
+            target_df = df_ref
+
+    for df_ref, name in [(source_df, "source"), (target_df, "target")]:
+        if "SCH" in df_ref.columns:
+            df_ref = df_ref.with_columns(
+                pl.concat_str([pl.col("SCH"), pl.lit("."), pl.col("TABLE_NAME")]).alias("SCH_TABLE")
             )
         else:
-            source_df = source_df.with_columns(pl.col("TABLE_NAME").alias("SCH_TABLE"))
-
-        if "SCH" in target_df.columns:
-            target_df = target_df.with_columns(
-                pl.concat_str([pl.col("SCH"), pl.lit("."), pl.col("TABLE_NAME")]).alias(
-                    "SCH_TABLE"
-                )
-            )
+            df_ref = df_ref.with_columns(pl.col("TABLE_NAME").alias("SCH_TABLE"))
+        if name == "source":
+            source_df = df_ref
         else:
-            target_df = target_df.with_columns(pl.col("TABLE_NAME").alias("SCH_TABLE"))
+            target_df = df_ref
 
     return source_df, target_df
 
 
+# ---------------------------------------------------------------------------
+# Comparison logic
+# ---------------------------------------------------------------------------
+
+
 def compare_tables(source_df, target_df):
-    """Compare tables between source and target"""
+    """Compare tables between source and target."""
     source_tables = set(source_df["SCH_TABLE"].unique())
     target_tables = set(target_df["SCH_TABLE"].unique())
-
-    common_tables = source_tables.intersection(target_tables)
-    source_only = source_tables - target_tables
-    target_only = target_tables - source_tables
-
     return {
-        "common": sorted(list(common_tables)),
-        "source_only": sorted(list(source_only)),
-        "target_only": sorted(list(target_only)),
+        "common": sorted(source_tables & target_tables),
+        "source_only": sorted(source_tables - target_tables),
+        "target_only": sorted(target_tables - source_tables),
     }
 
 
 def compare_columns(source_df, target_df, table_name, type_mappings=None):
-    """Compare columns for a specific table"""
-    source_cols = source_df.filter(pl.col("SCH_TABLE") == table_name).select(
-        ["COL_NAME", "DATA_TYPE"]
-    )
-    target_cols = target_df.filter(pl.col("SCH_TABLE") == table_name).select(
-        ["COL_NAME", "DATA_TYPE"]
-    )
+    """Compare columns for a specific table."""
+    source_cols = source_df.filter(pl.col("SCH_TABLE") == table_name).select(["COL_NAME", "DATA_TYPE"])
+    target_cols = target_df.filter(pl.col("SCH_TABLE") == table_name).select(["COL_NAME", "DATA_TYPE"])
 
-    source_cols_set = set(source_cols["COL_NAME"].to_list())
-    target_cols_set = set(target_cols["COL_NAME"].to_list())
+    src_set = set(source_cols["COL_NAME"].to_list())
+    tgt_set = set(target_cols["COL_NAME"].to_list())
+    common = src_set & tgt_set
 
-    common_cols = source_cols_set.intersection(target_cols_set)
-    source_only = source_cols_set - target_cols_set
-    target_only = target_cols_set - source_cols_set
-
-    # Compare data types for common columns
-    datatype_mismatches = []
-    for col in common_cols:
-        source_type = source_cols.filter(pl.col("COL_NAME") == col)["DATA_TYPE"].item()
-        target_type = target_cols.filter(pl.col("COL_NAME") == col)["DATA_TYPE"].item()
-        if not are_types_compatible(source_type, target_type, type_mappings):
-            datatype_mismatches.append(
-                {"column": col, "source_type": source_type, "target_type": target_type}
-            )
+    mismatches = []
+    for col in common:
+        st = source_cols.filter(pl.col("COL_NAME") == col)["DATA_TYPE"].item()
+        tt = target_cols.filter(pl.col("COL_NAME") == col)["DATA_TYPE"].item()
+        if not are_types_compatible(st, tt, type_mappings):
+            mismatches.append({"column": col, "source_type": st, "target_type": tt})
 
     return {
-        "common": sorted(list(common_cols)),
-        "source_only": sorted(list(source_only)),
-        "target_only": sorted(list(target_only)),
-        "datatype_mismatches": datatype_mismatches,
+        "common": sorted(common),
+        "source_only": sorted(src_set - tgt_set),
+        "target_only": sorted(tgt_set - src_set),
+        "datatype_mismatches": mismatches,
     }
 
 
-def format_worksheet(ws):
-    """Apply formatting to worksheet"""
-    header_fill = PatternFill(
-        start_color="366092", end_color="366092", fill_type="solid"
-    )
-    header_font = Font(color="FFFFFF", bold=True)
+# ---------------------------------------------------------------------------
+# Excel report
+# ---------------------------------------------------------------------------
 
-    # Format headers
+
+def _format_worksheet(ws):
+    """Apply formatting to worksheet."""
+    header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+    header_font = Font(color="FFFFFF", bold=True)
     for cell in ws[1]:
         cell.fill = header_fill
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center")
-
-    # Adjust column widths
     for column in ws.columns:
-        max_length = 0
         column = list(column)
-        for cell in column:
-            try:
-                if len(str(cell.value)) > max_length:
-                    max_length = len(str(cell.value))
-            except:
-                pass
-        # Calculate width: add 2 for padding, cap at 21.6 (3 inches)
-        # If content is smaller, use the smaller width
-        adjusted_width = min(max_length + 2, 21.6)
-        ws.column_dimensions[get_column_letter(column[0].column)].width = adjusted_width
+        max_len = max((len(str(c.value or "")) for c in column), default=0)
+        ws.column_dimensions[get_column_letter(column[0].column)].width = min(max_len + 2, 21.6)
 
 
-def create_excel_report(
-    comparison_results, source_df, target_df, file_name, type_mappings=None
-):
-    """Create formatted Excel report"""
+def create_excel_report(comparison_results, source_df, target_df, file_name, type_mappings=None):
+    """Create formatted Excel report."""
     wb = Workbook()
 
-    # Table Comparison Sheet
-    ws_tables = wb.active
-    ws_tables.title = "Table Comparison"
-    ws_tables.append(["Category", "Table Name"])
+    # --- Table Comparison ---
+    ws = wb.active
+    ws.title = "Table Comparison"
+    ws.append(["Category", "Table Name"])
+    for cat in ("common", "source_only", "target_only"):
+        label = cat.replace("_", " ").title()
+        for t in comparison_results["tables"][cat]:
+            ws.append([label, t])
+    _format_worksheet(ws)
 
-    for table in comparison_results["tables"]["common"]:
-        ws_tables.append(["Common", table])
-    for table in comparison_results["tables"]["source_only"]:
-        ws_tables.append(["Source Only", table])
-    for table in comparison_results["tables"]["target_only"]:
-        ws_tables.append(["Target Only", table])
-
-    format_worksheet(ws_tables)
-
-    # Column Comparison Sheet
-    ws_columns = wb.create_sheet("Column Comparison")
-    ws_columns.append(
-        ["Table Name", "Column Name", "Status", "Source Type", "Target Type"]
-    )
-
-    for table in comparison_results["columns"]:
-        # Get all columns from source and target for this table
-        table_name = table["table_name"]
-        source_cols = source_df.filter(pl.col("SCH_TABLE") == table_name).select(
-            ["COL_NAME", "DATA_TYPE"]
+    # --- Column Comparison ---
+    ws2 = wb.create_sheet("Column Comparison")
+    ws2.append(["Table Name", "Column Name", "Status", "Source Type", "Target Type"])
+    for tbl in comparison_results["columns"]:
+        tn = tbl["table_name"]
+        src = dict(
+            zip(
+                source_df.filter(pl.col("SCH_TABLE") == tn)["COL_NAME"],
+                source_df.filter(pl.col("SCH_TABLE") == tn)["DATA_TYPE"],
+            )
         )
-        target_cols = target_df.filter(pl.col("SCH_TABLE") == table_name).select(
-            ["COL_NAME", "DATA_TYPE"]
+        tgt = dict(
+            zip(
+                target_df.filter(pl.col("SCH_TABLE") == tn)["COL_NAME"],
+                target_df.filter(pl.col("SCH_TABLE") == tn)["DATA_TYPE"],
+            )
         )
-
-        # Create dictionaries for easy lookup
-        source_types = dict(zip(source_cols["COL_NAME"], source_cols["DATA_TYPE"]))
-        target_types = dict(zip(target_cols["COL_NAME"], target_cols["DATA_TYPE"]))
-
-        # Process all columns
-        all_columns = sorted(set(list(source_types.keys()) + list(target_types.keys())))
-
-        for col in all_columns:
-            source_type = source_types.get(col, "N/A")
-            target_type = target_types.get(col, "N/A")
-
-            if col in table["source_only"]:
+        for col in sorted(set(list(src) + list(tgt))):
+            st, tt = src.get(col, "N/A"), tgt.get(col, "N/A")
+            if col in tbl["source_only"]:
                 status = "Source Only"
-            elif col in table["target_only"]:
+            elif col in tbl["target_only"]:
                 status = "Target Only"
-            else:  # Column exists in both
-                if are_types_compatible(source_type, target_type, type_mappings):
-                    status = "Matching"
-                else:
-                    status = "Different Types"
+            elif are_types_compatible(st, tt, type_mappings):
+                status = "Matching"
+            else:
+                status = "Different Types"
+            ws2.append([tn, col, status, st, tt])
+    _format_worksheet(ws2)
 
-            ws_columns.append(
-                [table["table_name"], col, status, source_type, target_type]
-            )
+    # --- Datatype Mismatches ---
+    ws3 = wb.create_sheet("Datatype Mismatches")
+    ws3.append(["Table Name", "Column Name", "Source Type", "Target Type"])
+    for tbl in comparison_results["columns"]:
+        for m in tbl["datatype_mismatches"]:
+            ws3.append([tbl["table_name"], m["column"], m["source_type"], m["target_type"]])
+    _format_worksheet(ws3)
 
-    format_worksheet(ws_columns)
-
-    # Datatype Mismatches Sheet
-    ws_datatypes = wb.create_sheet("Datatype Mismatches")
-    ws_datatypes.append(["Table Name", "Column Name", "Source Type", "Target Type"])
-
-    for table in comparison_results["columns"]:
-        for mismatch in table["datatype_mismatches"]:
-            ws_datatypes.append(
-                [
-                    table["table_name"],
-                    mismatch["column"],
-                    mismatch["source_type"],
-                    mismatch["target_type"],
-                ]
-            )
-
-    format_worksheet(ws_datatypes)
-
-    # Save the workbook with timestamp
     os.makedirs("results", exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    if "/" in file_name:
-        file_name = file_name.split("/")[-1]
-    wb.save(f"results/{file_name}_{timestamp}.xlsx")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_name = file_name.split("/")[-1] if "/" in file_name else file_name
+    wb.save(f"results/{safe_name}_{ts}.xlsx")
+
+
+# ---------------------------------------------------------------------------
+# Core comparison runners
+# ---------------------------------------------------------------------------
+
+
+def _run_comparison(source_df, target_df, report_name, type_mappings=None):
+    """Run table/column comparison and generate Excel report."""
+    table_comparison = compare_tables(source_df, target_df)
+    column_comparisons = []
+    for tbl in table_comparison["common"]:
+        cc = compare_columns(source_df, target_df, tbl, type_mappings)
+        column_comparisons.append({"table_name": tbl, **cc})
+
+    results = {"tables": table_comparison, "columns": column_comparisons}
+    create_excel_report(results, source_df, target_df, report_name, type_mappings)
+    return results
+
+
+def colcompare_from_db(source_config_path, target_config_path, type_mappings=None):
+    """Compare column schemas by fetching metadata directly from databases."""
+    with Timer("Database column comparison"):
+        source_config = load_config(source_config_path)
+        target_config = load_config(target_config_path)
+
+        tables_file = source_config.get("tables_file") or target_config.get("tables_file")
+        if not tables_file:
+            logger.error("tables_file must be specified in at least one config")
+            return
+
+        max_workers = source_config.get("max_workers", 4)
+        df, source_tables, target_tables = _read_table_lists(tables_file)
+
+        if target_tables is None:
+            target_tables = source_tables
+
+        source_df = fetch_metadata_parallel(source_config, source_tables, "source:", max_workers)
+        target_df = fetch_metadata_parallel(target_config, target_tables, "target:", max_workers)
+
+        report_name = Path(tables_file).stem
+        _run_comparison(source_df, target_df, report_name, type_mappings)
+        logger.info("Database column comparison complete")
 
 
 def colcompare(args=None):
+    """Run column comparison from files or database connections."""
     if isinstance(args, (list, type(None))):
-        # Called from command line
         parser = argparse.ArgumentParser(
-            description="Compare column schemas between two CSV or Parquet files",
+            description="Compare column schemas between CSV/Parquet files or databases",
             formatter_class=argparse.RawDescriptionHelpFormatter,
             epilog="""
 Generates an Excel report with three sheets:
@@ -432,74 +390,44 @@ To generate a default configuration file:
   dbqt colcompare --generate-config [--output PATH]
             """,
         )
-
-        parser.add_argument(
-            "--generate-config",
-            action="store_true",
-            help="Generate a default type mappings configuration file",
-        )
-        parser.add_argument(
-            "--output",
-            "-o",
-            default="colcompare_config.yaml",
-            help="Output path for config file (used with --generate-config)",
-        )
-        parser.add_argument(
-            "source", nargs="?", help="Path to the source CSV/Parquet file"
-        )
-        parser.add_argument(
-            "target", nargs="?", help="Path to the target CSV/Parquet file"
-        )
-        parser.add_argument(
-            "--config", "-c", help="Path to type mappings configuration file"
-        )
-        parser.add_argument(
-            "--verbose", "-v", action="store_true", help="Verbose logging"
-        )
+        parser.add_argument("--generate-config", action="store_true",
+                            help="Generate a default type mappings configuration file")
+        parser.add_argument("--output", "-o", default="colcompare_config.yaml",
+                            help="Output path for config file (used with --generate-config)")
+        parser.add_argument("source", nargs="?", help="Path to the source CSV/Parquet file")
+        parser.add_argument("target", nargs="?", help="Path to the target CSV/Parquet file")
+        parser.add_argument("--source-config", help="YAML config for source database")
+        parser.add_argument("--target-config", help="YAML config for target database")
+        parser.add_argument("--config", "-c", help="Path to type mappings configuration file")
+        parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
 
         args = parser.parse_args(args)
-
-        # Setup logging
         setup_logging(args.verbose)
 
-        # Handle generate-config command
         if args.generate_config:
             generate_config_file(args.output)
             return
 
-        # Validate that source and target are provided for comparison
-        if not args.source or not args.target:
-            parser.error("source and target arguments are required for comparison")
+        if args.source_config and args.target_config:
+            tm = load_type_mappings(getattr(args, "config", None))
+            colcompare_from_db(args.source_config, args.target_config, tm)
+            return
 
-    # Load type mappings
+        if not args.source or not args.target:
+            parser.error(
+                "Provide source and target files, or --source-config and --target-config"
+            )
+
     type_mappings = load_type_mappings(getattr(args, "config", None))
 
     with Timer("Column comparison"):
-        # Read source and target files
         source_df, target_df = read_files(args.source, args.target)
-
-        # Compare tables
-        table_comparison = compare_tables(source_df, target_df)
-
-        # Compare columns for common tables
-        column_comparisons = []
-        for table in table_comparison["common"]:
-            column_comparison = compare_columns(
-                source_df, target_df, table, type_mappings
-            )
-            column_comparisons.append({"table_name": table, **column_comparison})
-
-        # Create comparison results dictionary
-        comparison_results = {"tables": table_comparison, "columns": column_comparisons}
         target_file_name = args.target.split(".")[0]
-        # Generate Excel report
-        create_excel_report(
-            comparison_results, source_df, target_df, target_file_name, type_mappings
-        )
+        _run_comparison(source_df, target_df, target_file_name, type_mappings)
 
 
 def main(args=None):
-    """Entry point for the colcompare tool"""
+    """Entry point for the colcompare tool."""
     colcompare(args)
 
 
