@@ -1,15 +1,18 @@
-# DBQT (DataBase Quality Tool) 🎯
+# DBQT (DataBase Quality Tool)
 
 DBQT is a lightweight, Python-first data quality testing framework that helps data teams maintain high-quality data through automated checks and intelligent suggestions. 
 
-## 🛠️ Current Tools
+## Current Tools
 
-### Column Comparison Tool (dbqt compare)
+### Column Comparison Tool (dbqt colcompare / dbqt compare)
 Compare schemas between databases or files:
 - Table-level comparison
 - Column-level comparison with data type compatibility checks
 - Support for CSV and Parquet files
 - Handles nested Parquet schemas (arrays, structs, maps)
+- **Database-backed comparison** — fetch metadata directly from source/target databases
+- Retrieves precision information (datetime, numeric precision, numeric scale)
+- Supports `table`, `schema.table`, and `db.schema.table` patterns in CSV files
 - Intelligent data type compatibility checking
 - **Customizable type mappings via YAML configuration**
 - Generates detailed Excel report with:
@@ -20,20 +23,29 @@ Compare schemas between databases or files:
 
 Usage:
 ```bash
-# Basic comparison
-dbqt compare source_schema.csv target_schema.csv
+# Basic file-based comparison
+dbqt colcompare source_schema.csv target_schema.csv
 
 # Compare Parquet files directly
-dbqt compare source.parquet target.parquet
+dbqt colcompare source.parquet target.parquet
 
-# Generate a default type mappings configuration file
-dbqt compare --generate-config
+# Database-backed comparison (fetches metadata from live databases)
+dbqt colcompare --source-config source_config.yaml --target-config target_config.yaml
+
+# Generate a default column type mappings configuration file (works with both colcompare and dbstats)
+dbqt colcompare --generate-col-mappings
 
 # Generate config with custom output path
-dbqt compare --generate-config --output my_types.yaml
+dbqt colcompare --generate-col-mappings --output my_types.yaml
 
 # Use custom type mappings for comparison
-dbqt compare source.csv target.csv --config my_types.yaml
+dbqt colcompare source.csv target.csv --config my_types.yaml
+
+# Exclude specific columns from comparison (CLI flag)
+dbqt colcompare source.csv target.csv --excluded-cols CREATED_AT UPDATED_AT
+
+# Also available via alias
+dbqt compare source.csv target.csv
 ```
 
 **Customizing Type Mappings:**
@@ -42,12 +54,12 @@ The tool uses intelligent type compatibility checking (e.g., `INT` and `BIGINT` 
 
 1. Generate a default configuration file:
    ```bash
-   dbqt compare --generate-config
+   dbqt compare --generate-col-mappings
    ```
 
-2. Edit the generated `colcompare_config.yaml` file to add or modify type groups:
+2. Edit the generated `colcompare_config.yaml` file to add or modify type groups and excluded columns:
    ```yaml
-   description: Column comparison type mappings configuration. Each key represents a type group, and the list contains equivalent types.
+   description: Column comparison type mappings configuration. Each key represents a type group, and the list contains equivalent types. excluded_cols is a list of column names to ignore during comparison.
    type_mappings:
      INTEGER:
      - INT
@@ -64,6 +76,10 @@ The tool uses intelligent type compatibility checking (e.g., `INT` and `BIGINT` 
      - NVARCHAR
      - VARCHAR2
      # Add your custom types here
+   # Column names to exclude from comparison (case-insensitive)
+   excluded_cols:
+     - CREATED_AT
+     - UPDATED_AT
    ```
 
 3. Use your custom configuration:
@@ -96,22 +112,38 @@ Usage:
 dbqt combine [output.parquet]  # Combines all .parquet files in current directory
 ```
 
-### Database Statistics Tool (dbqt dbstats)
-Collect and analyze database statistics:
-- Fetches table row counts in parallel for faster execution
+### Database Statistics Tool (dbqt dbstats / dbqt rowcount / dbqt stats)
+Collect and analyze database statistics with multiple modes:
+- **rowcount** (default) — Fetches table row counts in parallel
+- **colcompare** — Compares column schemas between source and target databases
+- **both** — Runs row counts then column comparison in one command
 - Supports both single table analysis and source/target table comparisons
-- **NEW: Supports separate source and target database configurations** for cross-database comparisons
+- Supports separate source and target database configurations for cross-database comparisons
+- Supports `table`, `schema.table`, and `db.schema.table` patterns in CSV files
 - Automatically calculates differences and percentage changes for comparisons
 - Updates statistics in a CSV file with comprehensive error reporting
 - Configurable through YAML
 
 Usage:
 ```bash
-# Single database mode (source and target in same database)
+# Row counts — single database mode
 dbqt dbstats --config config.yaml
 
-# Dual database mode (source and target in different databases)
+# Row counts — dual database mode (source and target in different databases)
 dbqt dbstats --source-config source_config.yaml --target-config target_config.yaml
+
+# Column comparison via dbstats
+dbqt dbstats colcompare --source-config source_config.yaml --target-config target_config.yaml
+
+# Both row counts and column comparison in one run
+dbqt dbstats both --source-config source_config.yaml --target-config target_config.yaml
+
+# Generate a default column type mappings configuration file
+dbqt dbstats --generate-col-mappings
+
+# Also available via aliases
+dbqt rowcount --config config.yaml
+dbqt stats --config config.yaml
 ```
 
 Example config.yaml (single database mode):
@@ -177,6 +209,18 @@ connection:
 The tables.csv file should contain either:
 - A `table_name` column for single table analysis (adds `row_count` and `notes` columns)
 - `source_table` and `target_table` columns for comparison analysis (adds row counts, notes, difference, and percentage difference columns)
+
+**Auto-discovery:** If `tables_file` is omitted from the YAML config, dbqt will
+automatically discover all tables and views in the configured database schema and
+use those for row counts and/or column comparisons. In dual-database mode, only
+tables present in **both** databases will have row counts collected — tables that
+exist in only one side are reported with a note like *"Only in source, row count
+skipped"* since comparing a missing table is not meaningful.
+
+Table names in the CSV support flexible path formats:
+- `my_table` — uses database/schema from YAML config
+- `my_schema.my_table` — overrides schema, uses database from config
+- `my_db.my_schema.my_table` — fully qualified, ignores config defaults
 
 **Note:** When using dual database mode (`--source-config` and `--target-config`), the tool will:
 - Connect to the source database to count rows in `source_table` column
@@ -271,7 +315,7 @@ connection:
 - Use `--max-columns` to limit the number of columns analyzed (default: 20)
 - The tool will warn if the combination count exceeds 50,000 (use `--force` to proceed)
 
-## 🚀 Future Plans
+## Future Plans
 
 ### Core DBQT Features (Coming Soon)
 - AI-Powered column classification using Qwen2 0.5B

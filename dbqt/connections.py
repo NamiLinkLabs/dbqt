@@ -14,6 +14,26 @@ from reladiff import connect as reladiff_connect
 logger = logging.getLogger(__name__)
 
 
+def normalize_table_path(table_name, config=None):
+    """Resolve table_name into (database, schema, table) using config defaults."""
+    if config is None:
+        config = {}
+    parts = table_name.split(".")
+    default_db = config.get("database") or config.get("sid")
+    default_schema = config.get("schema")
+    if len(parts) == 3:
+        return parts[0], parts[1], parts[2]
+    elif len(parts) == 2:
+        return default_db, parts[0], parts[1]
+    else:
+        return default_db, default_schema, parts[0]
+
+
+def build_qualified_table_name(database, schema, table_name):
+    """Build a dot-separated qualified name, skipping None components."""
+    return ".".join(p for p in (database, schema, table_name) if p)
+
+
 class DBConnector(ABC):
     def __init__(self, config):
         self.config = config
@@ -43,15 +63,19 @@ class DBConnector(ABC):
         return result
 
     def fetch_table_metadata(self, table_name):
-        query = f"""
-        SELECT column_name, data_type
-        FROM information_schema.columns
-        WHERE upper(table_name) = upper('{table_name}')
-        ORDER BY ordinal_position
-        """
+        db, schema, tbl = normalize_table_path(table_name, self.config)
+        where_parts = [f"upper(table_name) = upper('{tbl}')"]
+        if schema:
+            where_parts.append(f"upper(table_schema) = upper('{schema}')")
+        query = (
+            "SELECT column_name, data_type, datetime_precision, numeric_precision, numeric_scale"
+            " FROM information_schema.columns"
+            f" WHERE {' AND '.join(where_parts)}"
+            " ORDER BY ordinal_position"
+        )
         self.logger.info(f"Fetching metadata for table: {table_name}")
         result = self.run_query(query)
-        return [(row[0], row[1]) for row in result]
+        return [(row[0], row[1], row[2], row[3], row[4]) for row in result]
 
     def retrieve_table(self, table_name):
         return table(table_name)
@@ -62,12 +86,15 @@ class DBConnector(ABC):
                 col[0].upper(): col[1] for col in self.fetch_table_metadata(table_name)
             }
         except Exception as e:
-            print(f"Error retrieving source table metadata: {str(e)}")
+            self.logger.error(f"Error retrieving source table metadata: {str(e)}")
+            return {}
 
     def count_rows(self, table_name, where_clause=None):
         """Retrieve the total number of rows in a table."""
         try:
-            query = f"SELECT COUNT(*) FROM {table_name}"
+            db, schema, tbl = normalize_table_path(table_name, self.config)
+            qualified = build_qualified_table_name(db, schema, tbl)
+            query = f"SELECT COUNT(*) FROM {qualified}"
             if where_clause:
                 query += f" WHERE {where_clause}"
             result = self.run_query(query)
@@ -75,6 +102,45 @@ class DBConnector(ABC):
         except Exception as e:
             self.logger.error(f"Error counting rows for {table_name}: {str(e)}")
             return None
+
+    def fetch_schema_metadata(self, schema=None):
+        """Fetch column metadata for ALL tables in a schema in one query.
+
+        Returns a list of (table_name, column_name, data_type,
+        datetime_precision, numeric_precision, numeric_scale) tuples.
+        """
+        schema = schema or self.config.get("schema")
+        where_parts = []
+        if schema:
+            where_parts.append(f"upper(table_schema) = upper('{schema}')")
+        where_clause = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        query = (
+            "SELECT table_name, column_name, data_type,"
+            " datetime_precision, numeric_precision, numeric_scale"
+            f" FROM information_schema.columns{where_clause}"
+            " ORDER BY table_name, ordinal_position"
+        )
+        self.logger.info(f"Fetching schema-wide metadata (schema={schema})")
+        result = self.run_query(query)
+        return [(row[0], row[1], row[2], row[3], row[4], row[5]) for row in result]
+
+    def list_tables(self, schema=None):
+        """List all tables and views in the given schema (or config default)."""
+        schema = schema or self.config.get("schema")
+        if not schema:
+            raise ValueError(
+                "Cannot discover tables: no schema specified in config or argument"
+            )
+        query = (
+            "SELECT table_name FROM information_schema.tables"
+            f" WHERE upper(table_schema) = upper('{schema}')"
+            " ORDER BY table_name"
+        )
+        self.logger.info(f"Discovering tables in schema: {schema}")
+        result = self.run_query(query)
+        tables = [row[0] for row in result]
+        self.logger.info(f"Found {len(tables)} tables in schema {schema}")
+        return tables
 
     def generate_table_from_query(self, table_name, query):
         self.logger.info(f"Generating table {table_name}")
@@ -84,25 +150,86 @@ class DBConnector(ABC):
 
 
 class MySQL(DBConnector):
+    def fetch_schema_metadata(self, schema=None):
+        schema = schema or self.config.get("database", "")
+        query = f"""
+        SELECT UPPER(TABLE_NAME), UPPER(COLUMN_NAME), DATA_TYPE,
+               DATETIME_PRECISION, NUMERIC_PRECISION, NUMERIC_SCALE
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE UPPER(TABLE_SCHEMA) = UPPER('{schema}')
+        ORDER BY TABLE_NAME, ORDINAL_POSITION
+        """
+        self.logger.info(f"Fetching schema-wide metadata (database={schema})")
+        result = self.run_query(query)
+        return [(row[0], row[1], row[2], row[3], row[4], row[5]) for row in result]
+
+    def list_tables(self, schema=None):
+        schema = schema or self.config.get("database")
+        if not schema:
+            raise ValueError("Cannot discover tables: no database specified in config")
+        query = (
+            "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES"
+            f" WHERE UPPER(TABLE_SCHEMA) = UPPER('{schema}')"
+            " ORDER BY TABLE_NAME"
+        )
+        self.logger.info(f"Discovering tables in database: {schema}")
+        result = self.run_query(query)
+        tables = [row[0] for row in result]
+        self.logger.info(f"Found {len(tables)} tables in database {schema}")
+        return tables
+
     @property
     def connection_details(self):
         conn_str = f"mysql://{self.config['user']}:{self.config['password']}@{self.config['host']}:{self.config.get('port', '3306')}/{self.config.get('database', 'information_schema')}"
         return conn_str
 
     def fetch_table_metadata(self, table_name):
+        db, schema, tbl = normalize_table_path(table_name, self.config)
+        db_filter = schema or self.config.get("database", "")
         query = f"""
-        SELECT UPPER(COLUMN_NAME) AS COLUMN_NAME, DATA_TYPE
+        SELECT UPPER(COLUMN_NAME) AS COLUMN_NAME, DATA_TYPE,
+               DATETIME_PRECISION, NUMERIC_PRECISION, NUMERIC_SCALE
         FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE UPPER(TABLE_SCHEMA) = UPPER('{self.config['database']}') 
-        AND UPPER(TABLE_NAME) = UPPER('{table_name}')
+        WHERE UPPER(TABLE_SCHEMA) = UPPER('{db_filter}') 
+        AND UPPER(TABLE_NAME) = UPPER('{tbl}')
         ORDER BY ORDINAL_POSITION
         """
         self.logger.info(f"Fetching metadata for table: {table_name}")
         result = self.run_query(query)
-        return [(row[0], row[1]) for row in result]
+        return [(row[0], row[1], row[2], row[3], row[4]) for row in result]
 
 
 class Snowflake(DBConnector):
+    def fetch_schema_metadata(self, schema=None):
+        catalog = self.config.get("database", "")
+        schema = schema or self.config.get("schema", "")
+        query = f"""
+        SELECT UPPER(TABLE_NAME), UPPER(COLUMN_NAME), DATA_TYPE,
+               DATETIME_PRECISION, NUMERIC_PRECISION, NUMERIC_SCALE
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE UPPER(TABLE_CATALOG) = UPPER('{catalog}')
+        AND UPPER(TABLE_SCHEMA) = UPPER('{schema}')
+        ORDER BY TABLE_NAME, ORDINAL_POSITION
+        """
+        self.logger.info(f"Fetching schema-wide metadata ({catalog}.{schema})")
+        result = self.run_query(query)
+        return [(row[0], row[1], row[2], row[3], row[4], row[5]) for row in result]
+
+    def list_tables(self, schema=None):
+        catalog = self.config.get("database", "")
+        schema = schema or self.config.get("schema", "")
+        query = (
+            "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES"
+            f" WHERE UPPER(TABLE_CATALOG) = UPPER('{catalog}')"
+            f" AND UPPER(TABLE_SCHEMA) = UPPER('{schema}')"
+            " ORDER BY TABLE_NAME"
+        )
+        self.logger.info(f"Discovering tables in {catalog}.{schema}")
+        result = self.run_query(query)
+        tables = [row[0] for row in result]
+        self.logger.info(f"Found {len(tables)} tables in {catalog}.{schema}")
+        return tables
+
     @property
     def connection_details(self):
         auth = (
@@ -114,18 +241,22 @@ class Snowflake(DBConnector):
         return conn_str
 
     def fetch_table_metadata(self, table_name):
+        db, schema, tbl = normalize_table_path(table_name, self.config)
+        catalog = db or self.config.get("database", "")
+        schema = schema or self.config.get("schema", "")
         query = f"""
-        SELECT UPPER(COLUMN_NAME) AS COLUMN_NAME, DATA_TYPE
+        SELECT UPPER(COLUMN_NAME) AS COLUMN_NAME, DATA_TYPE,
+               DATETIME_PRECISION, NUMERIC_PRECISION, NUMERIC_SCALE
         FROM INFORMATION_SCHEMA.COLUMNS
         WHERE 
-        UPPER(TABLE_CATALOG) = UPPER('{self.config['database']}') 
-        AND UPPER(TABLE_SCHEMA) = UPPER('{self.config['schema']}') 
-        AND UPPER(TABLE_NAME) = UPPER('{table_name}')
+        UPPER(TABLE_CATALOG) = UPPER('{catalog}') 
+        AND UPPER(TABLE_SCHEMA) = UPPER('{schema}') 
+        AND UPPER(TABLE_NAME) = UPPER('{tbl}')
         ORDER BY ORDINAL_POSITION
         """
         self.logger.info(f"Fetching metadata for table: {table_name}")
         result = self.run_query(query)
-        return [(row[0], row[1]) for row in result]
+        return [(row[0], row[1], row[2], row[3], row[4]) for row in result]
 
 
 class DuckDB(DBConnector):
@@ -267,6 +398,32 @@ class PostgreSQL(DBConnector):
 
 
 class SQLServer(DBConnector):
+    def fetch_schema_metadata(self, schema=None):
+        schema = schema or self.config.get("schema", "dbo")
+        query = f"""
+        SELECT UPPER(TABLE_NAME), UPPER(COLUMN_NAME), DATA_TYPE,
+               DATETIME_PRECISION, NUMERIC_PRECISION, NUMERIC_SCALE
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE UPPER(TABLE_SCHEMA) = UPPER('{schema}')
+        ORDER BY TABLE_NAME, ORDINAL_POSITION
+        """
+        self.logger.info(f"Fetching schema-wide metadata (schema={schema})")
+        result = self.run_query(query)
+        return [(row[0], row[1], row[2], row[3], row[4], row[5]) for row in result]
+
+    def list_tables(self, schema=None):
+        schema = schema or self.config.get("schema", "dbo")
+        query = (
+            "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES"
+            f" WHERE UPPER(TABLE_SCHEMA) = UPPER('{schema}')"
+            " ORDER BY TABLE_NAME"
+        )
+        self.logger.info(f"Discovering tables in schema: {schema}")
+        result = self.run_query(query)
+        tables = [row[0] for row in result]
+        self.logger.info(f"Found {len(tables)} tables in schema {schema}")
+        return tables
+
     @property
     def connection_details(self):
         # Build connection string for SQL Server / Azure Synapse
@@ -296,26 +453,52 @@ class SQLServer(DBConnector):
         return result if result else "Success"
 
     def fetch_table_metadata(self, table_name):
-        # Handle schema.table format
-        if "." in table_name:
-            schema, table = table_name.split(".", 1)
-        else:
-            schema = self.config.get("schema", "dbo")
-            table = table_name
-
+        db, schema, tbl = normalize_table_path(table_name, self.config)
+        schema = schema or self.config.get("schema", "dbo")
         query = f"""
-        SELECT UPPER(COLUMN_NAME) AS COLUMN_NAME, DATA_TYPE
+        SELECT UPPER(COLUMN_NAME) AS COLUMN_NAME, DATA_TYPE,
+               DATETIME_PRECISION, NUMERIC_PRECISION, NUMERIC_SCALE
         FROM INFORMATION_SCHEMA.COLUMNS
         WHERE UPPER(TABLE_SCHEMA) = UPPER('{schema}') 
-        AND UPPER(TABLE_NAME) = UPPER('{table}')
+        AND UPPER(TABLE_NAME) = UPPER('{tbl}')
         ORDER BY ORDINAL_POSITION
         """
-        self.logger.info(f"Fetching metadata for table: {schema}.{table}")
+        self.logger.info(f"Fetching metadata for table: {schema}.{tbl}")
         result = self.run_query(query)
-        return [(row[0], row[1]) for row in result]
+        return [(row[0], row[1], row[2], row[3], row[4]) for row in result]
 
 
 class Oracle(DBConnector):
+    def fetch_schema_metadata(self, schema=None):
+        schema = schema or self.config.get("schema", self.config["user"].upper())
+        query = f"""
+        SELECT UPPER(TABLE_NAME), UPPER(COLUMN_NAME), DATA_TYPE,
+               6 AS DATETIME_PRECISION, DATA_PRECISION AS NUMERIC_PRECISION,
+               DATA_SCALE AS NUMERIC_SCALE
+        FROM ALL_TAB_COLUMNS
+        WHERE UPPER(OWNER) = UPPER('{schema}')
+        ORDER BY TABLE_NAME, COLUMN_ID
+        """
+        self.logger.info(f"Fetching schema-wide metadata (schema={schema})")
+        result = self.run_query(query)
+        return [(row[0], row[1], row[2], row[3], row[4], row[5]) for row in result]
+
+    def list_tables(self, schema=None):
+        schema = schema or self.config.get("schema", self.config["user"].upper())
+        query = (
+            "SELECT TABLE_NAME FROM ALL_TABLES"
+            f" WHERE UPPER(OWNER) = UPPER('{schema}')"
+            " UNION"
+            " SELECT VIEW_NAME AS TABLE_NAME FROM ALL_VIEWS"
+            f" WHERE UPPER(OWNER) = UPPER('{schema}')"
+            " ORDER BY TABLE_NAME"
+        )
+        self.logger.info(f"Discovering tables in schema: {schema}")
+        result = self.run_query(query)
+        tables = [row[0] for row in result]
+        self.logger.info(f"Found {len(tables)} tables in schema {schema}")
+        return tables
+
     def __init__(self, config):
         super().__init__(config)
         self.jdbc_driver = config.get("jdbc_driver", "oracle.jdbc.OracleDriver")
@@ -406,26 +589,35 @@ class Oracle(DBConnector):
         return result if result else "Success"
 
     def fetch_table_metadata(self, table_name):
-        # Handle schema.table format
-        if "." in table_name:
-            schema, table = table_name.split(".", 1)
-        else:
-            schema = self.config.get("schema", self.config["user"].upper())
-            table = table_name
-
+        db, schema, tbl = normalize_table_path(table_name, self.config)
+        schema = schema or self.config.get("schema", self.config["user"].upper())
         query = f"""
-        SELECT UPPER(COLUMN_NAME) AS COLUMN_NAME, DATA_TYPE
+        SELECT UPPER(COLUMN_NAME) AS COLUMN_NAME, DATA_TYPE,
+               6 AS DATETIME_PRECISION, DATA_PRECISION AS NUMERIC_PRECISION,
+               DATA_SCALE AS NUMERIC_SCALE
         FROM ALL_TAB_COLUMNS
         WHERE UPPER(OWNER) = UPPER('{schema}') 
-        AND UPPER(TABLE_NAME) = UPPER('{table}')
+        AND UPPER(TABLE_NAME) = UPPER('{tbl}')
         ORDER BY COLUMN_ID
         """
-        self.logger.info(f"Fetching metadata for table: {schema}.{table}")
+        self.logger.info(f"Fetching metadata for table: {schema}.{tbl}")
         result = self.run_query(query)
-        return [(row[0], row[1]) for row in result]
+        return [(row[0], row[1], row[2], row[3], row[4]) for row in result]
 
 
 class Athena(DBConnector):
+    def list_tables(self, schema=None):
+        database = schema or self.config.get("database")
+        if not database:
+            raise ValueError("Cannot discover tables: no database specified in config")
+        query = f"SHOW TABLES IN {database}"
+        self.logger.info(f"Discovering tables in database: {database}")
+        result = self.run_query(query)
+        # Athena SHOW TABLES returns rows with header; skip first row
+        tables = [row[0] for row in result[1:] if row[0]]
+        self.logger.info(f"Found {len(tables)} tables in database {database}")
+        return tables
+
     def __init__(self, config):
         super().__init__(config)
         self.session = boto3.Session(profile_name=config.get("aws_profile", "default"))
