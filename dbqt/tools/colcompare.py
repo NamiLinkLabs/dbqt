@@ -50,13 +50,28 @@ def load_type_mappings(config_path=None):
     return DEFAULT_TYPE_MAPPINGS
 
 
+def load_excluded_cols(config_path=None):
+    """Load excluded column names from YAML config file.
+
+    Returns a set of upper-cased column names that should be ignored
+    during column comparison.
+    """
+    if config_path and Path(config_path).exists():
+        with open(config_path, "r") as f:
+            config = yaml.safe_load(f)
+            raw = config.get("excluded_cols", [])
+            if raw:
+                excluded = {c.upper() for c in raw}
+                logger.info(
+                    f"Excluding {len(excluded)} columns from comparison: {excluded}"
+                )
+                return excluded
+    return set()
+
+
 def generate_config_file(output_path="colcompare_config.yaml"):
     """Generate a default configuration file with type mappings."""
-    config = {
-        "type_mappings": DEFAULT_TYPE_MAPPINGS,
-        "description": "Column comparison type mappings configuration. "
-        "Each key represents a type group, and the list contains equivalent types.",
-    }
+    config = {"type_mappings": DEFAULT_TYPE_MAPPINGS}
 
     output_file = Path(output_path)
     if output_file.exists():
@@ -67,7 +82,18 @@ def generate_config_file(output_path="colcompare_config.yaml"):
             return
 
     with open(output_path, "w") as f:
+        f.write(
+            "# Column comparison type mappings configuration.\n"
+            "# Each key represents a type group, and the list contains equivalent types.\n"
+        )
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+        # Append excluded_cols in block style with commented examples
+        f.write(
+            "\n# Column names to exclude from comparison (case-insensitive)\n"
+            "excluded_cols:\n"
+            "  # - CREATED_AT\n"
+            "  # - UPDATED_AT\n"
+        )
 
     logger.info(f"Generated default config file at {output_path}")
     print(f"\nDefault configuration saved to: {output_path}")
@@ -243,14 +269,27 @@ def compare_tables(source_df, target_df):
     }
 
 
-def compare_columns(source_df, target_df, table_name, type_mappings=None):
-    """Compare columns for a specific table."""
+def compare_columns(
+    source_df, target_df, table_name, type_mappings=None, excluded_cols=None
+):
+    """Compare columns for a specific table.
+
+    Parameters
+    ----------
+    excluded_cols : set[str] | None
+        Upper-cased column names to ignore during comparison.
+    """
     source_cols = source_df.filter(pl.col("SCH_TABLE") == table_name).select(
         ["COL_NAME", "DATA_TYPE"]
     )
     target_cols = target_df.filter(pl.col("SCH_TABLE") == table_name).select(
         ["COL_NAME", "DATA_TYPE"]
     )
+
+    # Apply exclusion filter
+    if excluded_cols:
+        source_cols = source_cols.filter(~pl.col("COL_NAME").is_in(list(excluded_cols)))
+        target_cols = target_cols.filter(~pl.col("COL_NAME").is_in(list(excluded_cols)))
 
     src_set = set(source_cols["COL_NAME"].to_list())
     tgt_set = set(target_cols["COL_NAME"].to_list())
@@ -295,7 +334,12 @@ def _format_worksheet(ws):
 
 
 def create_excel_report(
-    comparison_results, source_df, target_df, file_name, type_mappings=None
+    comparison_results,
+    source_df,
+    target_df,
+    file_name,
+    type_mappings=None,
+    excluded_cols=None,
 ):
     """Create formatted Excel report."""
     wb = Workbook()
@@ -328,6 +372,8 @@ def create_excel_report(
             )
         )
         for col in sorted(set(list(src) + list(tgt))):
+            if excluded_cols and col.upper() in excluded_cols:
+                continue
             st, tt = src.get(col, "N/A"), tgt.get(col, "N/A")
             if col in tbl["source_only"]:
                 status = "Source Only"
@@ -361,20 +407,26 @@ def create_excel_report(
 # ---------------------------------------------------------------------------
 
 
-def _run_comparison(source_df, target_df, report_name, type_mappings=None):
+def _run_comparison(
+    source_df, target_df, report_name, type_mappings=None, excluded_cols=None
+):
     """Run table/column comparison and generate Excel report."""
     table_comparison = compare_tables(source_df, target_df)
     column_comparisons = []
     for tbl in table_comparison["common"]:
-        cc = compare_columns(source_df, target_df, tbl, type_mappings)
+        cc = compare_columns(source_df, target_df, tbl, type_mappings, excluded_cols)
         column_comparisons.append({"table_name": tbl, **cc})
 
     results = {"tables": table_comparison, "columns": column_comparisons}
-    create_excel_report(results, source_df, target_df, report_name, type_mappings)
+    create_excel_report(
+        results, source_df, target_df, report_name, type_mappings, excluded_cols
+    )
     return results
 
 
-def colcompare_from_db(source_config_path, target_config_path, type_mappings=None):
+def colcompare_from_db(
+    source_config_path, target_config_path, type_mappings=None, excluded_cols=None
+):
     """Compare column schemas by fetching metadata directly from databases."""
     with Timer("Database column comparison"):
         source_config = load_config(source_config_path)
@@ -403,7 +455,7 @@ def colcompare_from_db(source_config_path, target_config_path, type_mappings=Non
 
             schema_label = get_schema_label(target_config)
             report_name = f"{schema_label}_colcompare_report"
-        _run_comparison(source_df, target_df, report_name, type_mappings)
+        _run_comparison(source_df, target_df, report_name, type_mappings, excluded_cols)
         logger.info("Database column comparison complete")
 
 
@@ -448,6 +500,12 @@ To generate a default configuration file:
             "--config", "-c", help="Path to type mappings configuration file"
         )
         parser.add_argument(
+            "--excluded-cols",
+            nargs="*",
+            default=None,
+            help="Column names to exclude from comparison (overrides config file)",
+        )
+        parser.add_argument(
             "--verbose", "-v", action="store_true", help="Verbose logging"
         )
 
@@ -458,9 +516,18 @@ To generate a default configuration file:
             generate_config_file(args.output)
             return
 
+        # Build excluded_cols set: CLI flag takes priority, then config file
+        config_path = getattr(args, "config", None)
+        if args.excluded_cols is not None:
+            excluded_cols = {c.upper() for c in args.excluded_cols}
+        else:
+            excluded_cols = load_excluded_cols(config_path)
+
         if args.source_config and args.target_config:
-            tm = load_type_mappings(getattr(args, "config", None))
-            colcompare_from_db(args.source_config, args.target_config, tm)
+            tm = load_type_mappings(config_path)
+            colcompare_from_db(
+                args.source_config, args.target_config, tm, excluded_cols
+            )
             return
 
         if not args.source or not args.target:
@@ -468,12 +535,20 @@ To generate a default configuration file:
                 "Provide source and target files, or --source-config and --target-config"
             )
 
-    type_mappings = load_type_mappings(getattr(args, "config", None))
+    config_path = getattr(args, "config", None)
+    type_mappings = load_type_mappings(config_path)
+    if not hasattr(args, "_excluded_cols_resolved"):
+        if getattr(args, "excluded_cols", None) is not None:
+            excluded_cols = {c.upper() for c in args.excluded_cols}
+        else:
+            excluded_cols = load_excluded_cols(config_path)
 
     with Timer("Column comparison"):
         source_df, target_df = read_files(args.source, args.target)
         target_file_name = args.target.split(".")[0]
-        _run_comparison(source_df, target_df, target_file_name, type_mappings)
+        _run_comparison(
+            source_df, target_df, target_file_name, type_mappings, excluded_cols
+        )
 
 
 def main(args=None):

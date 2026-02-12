@@ -41,6 +41,9 @@ dbqt colcompare --generate-col-mappings --output my_types.yaml
 # Use custom type mappings for comparison
 dbqt colcompare source.csv target.csv --config my_types.yaml
 
+# Exclude specific columns from comparison (CLI flag)
+dbqt colcompare source.csv target.csv --excluded-cols CREATED_AT UPDATED_AT
+
 # Also available via alias
 dbqt compare source.csv target.csv
 ```
@@ -54,9 +57,9 @@ The tool uses intelligent type compatibility checking (e.g., `INT` and `BIGINT` 
    dbqt compare --generate-config
    ```
 
-2. Edit the generated `colcompare_config.yaml` file to add or modify type groups:
+2. Edit the generated `colcompare_config.yaml` file to add or modify type groups and excluded columns:
    ```yaml
-   description: Column comparison type mappings configuration. Each key represents a type group, and the list contains equivalent types.
+   description: Column comparison type mappings configuration. Each key represents a type group, and the list contains equivalent types. excluded_cols is a list of column names to ignore during comparison.
    type_mappings:
      INTEGER:
      - INT
@@ -73,6 +76,10 @@ The tool uses intelligent type compatibility checking (e.g., `INT` and `BIGINT` 
      - NVARCHAR
      - VARCHAR2
      # Add your custom types here
+   # Column names to exclude from comparison (case-insensitive)
+   excluded_cols:
+     - CREATED_AT
+     - UPDATED_AT
    ```
 
 3. Use your custom configuration:

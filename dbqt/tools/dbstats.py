@@ -27,7 +27,9 @@ def _load_configs(config_path, source_config_path, target_config_path):
     if source_config_path and target_config_path:
         source_config = load_config(source_config_path)
         target_config = load_config(target_config_path)
-        tables_file = source_config.get("tables_file") or target_config.get("tables_file")
+        tables_file = source_config.get("tables_file") or target_config.get(
+            "tables_file"
+        )
         max_workers = source_config.get("max_workers", 4)
     elif config_path:
         config = load_config(config_path)
@@ -85,13 +87,15 @@ def get_table_stats(
 
             # Filter to tables that should actually be counted
             source_tables_to_count = [
-                t for t in source_tables
+                t
+                for t in source_tables
                 if discovery_status.get(t, "common") in ("common", "source_only_count")
                 and discovery_status.get(t, "common") != "target_only"
                 and discovery_status.get(t, "common") != "source_only"
             ]
             target_tables_to_count = [
-                t for t in target_tables
+                t
+                for t in target_tables
                 if discovery_status.get(t, "common") in ("common", "target_only_count")
                 and discovery_status.get(t, "common") != "source_only"
                 and discovery_status.get(t, "common") != "target_only"
@@ -163,7 +167,9 @@ def get_table_stats(
             df = df.select(cols)
 
             df = df.with_columns(
-                (pl.col("target_row_count") - pl.col("source_row_count")).alias("difference")
+                (pl.col("target_row_count") - pl.col("source_row_count")).alias(
+                    "difference"
+                )
             )
             df = df.with_columns(
                 (((pl.col("difference") / pl.col("source_row_count")) * 100))
@@ -210,7 +216,12 @@ def get_table_stats(
 
 def main(args=None):
     import argparse
-    from dbqt.tools.colcompare import generate_config_file, colcompare_from_db, load_type_mappings
+    from dbqt.tools.colcompare import (
+        generate_config_file,
+        colcompare_from_db,
+        load_type_mappings,
+        load_excluded_cols,
+    )
 
     parser = argparse.ArgumentParser(
         description="Database statistics: row counts and/or column comparison",
@@ -237,14 +248,17 @@ Examples:
     parser.add_argument("--config", help="YAML config (used as both source and target)")
     parser.add_argument("--source-config", help="YAML config for source database")
     parser.add_argument("--target-config", help="YAML config for target database")
-    parser.add_argument("--type-config", help="Path to type mappings config file (colcompare mode)")
+    parser.add_argument(
+        "--type-config", help="Path to type mappings config file (colcompare mode)"
+    )
     parser.add_argument(
         "--generate-col-mappings",
         action="store_true",
         help="Generate a default column type mappings configuration file",
     )
     parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         default="colcompare_config.yaml",
         help="Output path for generated config file",
     )
@@ -278,10 +292,13 @@ Examples:
 
     if mode in ("colcompare", "both"):
         type_mappings = load_type_mappings(args.type_config)
+        excluded_cols = load_excluded_cols(args.type_config)
         if args.source_config and args.target_config:
-            colcompare_from_db(args.source_config, args.target_config, type_mappings)
+            colcompare_from_db(
+                args.source_config, args.target_config, type_mappings, excluded_cols
+            )
         elif args.config:
-            colcompare_from_db(args.config, args.config, type_mappings)
+            colcompare_from_db(args.config, args.config, type_mappings, excluded_cols)
         else:
             parser.error(
                 "Either --config or both --source-config and --target-config required"
