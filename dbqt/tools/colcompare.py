@@ -474,7 +474,7 @@ Generates an Excel report with three sheets:
 The report is saved to ./results/ with a timestamp in the filename.
 
 To generate a default configuration file:
-  dbqt colcompare --generate-config [--output PATH]
+  dbqt colcompare --generate-col-mappings [--output PATH]
             """,
         )
         parser.add_argument(

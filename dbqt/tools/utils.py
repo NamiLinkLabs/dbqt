@@ -295,9 +295,21 @@ def metadata_to_df(results, table_names):
                     "SCH_TABLE": table_name,
                     "COL_NAME": str(col_row[0]).upper(),
                     "DATA_TYPE": str(col_row[1]).upper() if col_row[1] else "N/A",
-                    "DATETIME_PRECISION": col_row[2] if len(col_row) > 2 else None,
-                    "NUMERIC_PRECISION": col_row[3] if len(col_row) > 3 else None,
-                    "NUMERIC_SCALE": col_row[4] if len(col_row) > 4 else None,
+                    "DATETIME_PRECISION": (
+                        col_row[2]
+                        if len(col_row) > 2 and col_row[2] is not None
+                        else None
+                    ),
+                    "NUMERIC_PRECISION": (
+                        col_row[3]
+                        if len(col_row) > 3 and col_row[3] is not None
+                        else None
+                    ),
+                    "NUMERIC_SCALE": (
+                        col_row[4]
+                        if len(col_row) > 4 and col_row[4] is not None
+                        else None
+                    ),
                 }
             )
     if not rows:

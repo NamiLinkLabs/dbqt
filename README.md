@@ -54,7 +54,7 @@ The tool uses intelligent type compatibility checking (e.g., `INT` and `BIGINT` 
 
 1. Generate a default configuration file:
    ```bash
-   dbqt compare --generate-config
+   dbqt compare --generate-col-mappings
    ```
 
 2. Edit the generated `colcompare_config.yaml` file to add or modify type groups and excluded columns:
