@@ -1,8 +1,8 @@
-# DBQT (DataBase Quality Tool) 🎯
+# DBQT (DataBase Quality Tool)
 
 DBQT is a lightweight, Python-first data quality testing framework that helps data teams maintain high-quality data through automated checks and intelligent suggestions. 
 
-## 🛠️ Current Tools
+## Current Tools
 
 ### Column Comparison Tool (dbqt colcompare / dbqt compare)
 Compare schemas between databases or files:
@@ -308,7 +308,7 @@ connection:
 - Use `--max-columns` to limit the number of columns analyzed (default: 20)
 - The tool will warn if the combination count exceeds 50,000 (use `--force` to proceed)
 
-## 🚀 Future Plans
+## Future Plans
 
 ### Core DBQT Features (Coming Soon)
 - AI-Powered column classification using Qwen2 0.5B
