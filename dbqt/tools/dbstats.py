@@ -172,9 +172,13 @@ def get_table_stats(
                 )
             )
             df = df.with_columns(
-                (((pl.col("difference") / pl.col("source_row_count")) * 100))
-                .fill_nan(0.0)
-                .alias("percentage_difference")
+                (
+                    (((pl.col("difference") / pl.col("source_row_count")) * 100))
+                    .fill_nan(0.0)
+                    .round(2)
+                    .cast(pl.Utf8)
+                    + pl.lit("%")
+                ).alias("percentage_difference")
             )
         else:
             # single-table mode
