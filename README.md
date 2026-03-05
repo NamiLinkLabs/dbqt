@@ -32,14 +32,20 @@ dbqt colcompare source.parquet target.parquet
 # Database-backed comparison (fetches metadata from live databases)
 dbqt colcompare --source-config source_config.yaml --target-config target_config.yaml
 
+# Use a custom type mappings config for database-backed comparison
+dbqt colcompare --source-config source_config.yaml --target-config target_config.yaml --type-config my_types.yaml
+
 # Generate a default column type mappings configuration file (works with both colcompare and dbstats)
 dbqt colcompare --generate-col-mappings
 
 # Generate config with custom output path
 dbqt colcompare --generate-col-mappings --output my_types.yaml
 
-# Use custom type mappings for comparison
+# Use custom type mappings for comparison (file-based)
 dbqt colcompare source.csv target.csv --config my_types.yaml
+
+# Use custom type mappings for comparison (database-backed)
+dbqt colcompare --source-config source_config.yaml --target-config target_config.yaml --type-config my_types.yaml
 
 # Exclude specific columns from comparison (CLI flag)
 dbqt colcompare source.csv target.csv --excluded-cols CREATED_AT UPDATED_AT

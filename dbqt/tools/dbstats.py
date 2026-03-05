@@ -239,6 +239,7 @@ Modes:
 Examples:
   dbqt dbstats --config config.yaml
   dbqt dbstats colcompare --source-config src.yaml --target-config tgt.yaml
+  dbqt dbstats colcompare --type-config colcompare_config.yaml --source-config src.yaml --target-config tgt.yaml
   dbqt dbstats both --source-config src.yaml --target-config tgt.yaml
         """,
     )
