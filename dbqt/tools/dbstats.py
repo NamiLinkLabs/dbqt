@@ -1,17 +1,19 @@
 """Database statistics tool — row counts with optional column comparison."""
 
-import polars as pl
 import logging
+import os
 import threading
+
+import polars as pl
 
 from dbqt.tools.utils import (
     load_config,
     ConnectionPool,
     setup_logging,
     Timer,
+    HTMLReport,
     _read_table_lists,
-    get_metadata_for_table,
-    metadata_to_df,
+    get_schema_label,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,15 +67,45 @@ def get_table_stats(
     config_path: str = None,
     source_config_path: str = None,
     target_config_path: str = None,
+    *,
+    report: HTMLReport = None,
+    source_config: dict = None,
+    target_config: dict = None,
+    table_lists: tuple = None,
 ):
-    """Collect row counts for tables listed in a CSV file."""
+    """Collect row counts for tables listed in a CSV file.
+
+    Parameters
+    ----------
+    report : HTMLReport | None
+        If provided, the row-count tab is added to this existing report
+        instead of creating a standalone file.  The caller is responsible
+        for saving the report.  Returns ``None`` in that case.
+    source_config / target_config : dict | None
+        Pre-loaded config dicts.  When provided the corresponding config
+        paths are not read, avoiding redundant file I/O.
+    table_lists : tuple | None
+        Pre-computed ``(df, source_tables, target_tables)`` from
+        ``_read_table_lists``.  When provided the table-discovery step is
+        skipped entirely, avoiding redundant database connections.
+    """
     with Timer("Database statistics collection"):
-        source_config, target_config, tables_file, max_workers = _load_configs(
-            config_path, source_config_path, target_config_path
-        )
-        df, source_tables, target_tables = _read_table_lists(
-            tables_file, source_config, target_config
-        )
+        if source_config is None or target_config is None:
+            source_config, target_config, tables_file, max_workers = _load_configs(
+                config_path, source_config_path, target_config_path
+            )
+        else:
+            tables_file = source_config.get("tables_file") or target_config.get(
+                "tables_file"
+            )
+            max_workers = source_config.get("max_workers", 4)
+
+        if table_lists is not None:
+            df, source_tables, target_tables = table_lists
+        else:
+            df, source_tables, target_tables = _read_table_lists(
+                tables_file, source_config, target_config
+            )
 
         if target_tables is not None:
             # source/target mode
@@ -201,16 +233,25 @@ def get_table_stats(
         if "_discovery_status" in df.columns:
             df = df.drop("_discovery_status")
 
+        # If an external report was provided, add the tab and return
+        if report is not None:
+            report.add_polars_tab("Row Counts", df)
+            logger.info("Row counts added to report")
+            return None
+
+        # Standalone mode — write our own HTML file
+        os.makedirs("results", exist_ok=True)
         if tables_file:
-            output_file = tables_file
+            base = os.path.splitext(os.path.basename(tables_file))[0]
         else:
-            from dbqt.tools.utils import get_schema_label
+            base = get_schema_label(target_config)
+        output_file = os.path.join("results", f"{base}_dbstats.html")
 
-            schema_label = get_schema_label(target_config)
-            output_file = f"{schema_label}_row_count.csv"
-
-        df.write_csv(output_file)
-        logger.info(f"Updated row counts in {output_file}")
+        standalone = HTMLReport(f"Database Statistics — {base}")
+        standalone.add_polars_tab("Row Counts", df)
+        standalone.save(output_file)
+        logger.info(f"Report saved to {output_file}")
+        return output_file
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +265,7 @@ def main(args=None):
         generate_config_file,
         colcompare_from_db,
         load_type_mappings,
-        load_excluded_cols,
+        collect_excluded_cols,
     )
 
     parser = argparse.ArgumentParser(
@@ -282,32 +323,91 @@ Examples:
 
     mode = args.mode
 
-    if mode in ("rowcount", "both"):
-        if args.source_config and args.target_config:
+    # Determine config sources
+    has_dual = args.source_config and args.target_config
+    has_single = args.config
+    if not has_dual and not has_single:
+        parser.error(
+            "Either --config or both --source-config and --target-config required"
+        )
+
+    if mode == "both":
+        # Build a single combined HTML report.
+        # Load configs and discover tables ONCE so that both row-count
+        # and column-comparison steps reuse them without reconnecting.
+        from datetime import datetime
+
+        if has_dual:
+            source_config = load_config(args.source_config)
+            target_config = load_config(args.target_config)
+        else:
+            source_config = target_config = load_config(args.config)
+
+        tables_file = source_config.get("tables_file") or target_config.get(
+            "tables_file"
+        )
+        if tables_file:
+            base = os.path.splitext(os.path.basename(tables_file))[0]
+        else:
+            base = get_schema_label(target_config)
+
+        # Discover tables once
+        table_lists = _read_table_lists(tables_file, source_config, target_config)
+        _df, source_tables, target_tables = table_lists
+
+        report = HTMLReport(f"Database Statistics — {base}")
+
+        # Row counts tab — pass pre-loaded configs and table lists
+        get_table_stats(
+            report=report,
+            source_config=source_config,
+            target_config=target_config,
+            table_lists=table_lists,
+        )
+
+        # Column comparison tabs — pass pre-loaded configs and table lists.
+        # Connectors are created inside colcompare_from_db (metadata fetch
+        # needs fresh connections after the row-count pool has shut down).
+        type_mappings = load_type_mappings(args.type_config)
+        excluded_cols = collect_excluded_cols(
+            args.type_config, source_config, target_config
+        )
+        colcompare_from_db(
+            type_mappings=type_mappings,
+            excluded_cols=excluded_cols,
+            report=report,
+            source_config=source_config,
+            target_config=target_config,
+            source_tables=source_tables,
+            target_tables=target_tables,
+            tables_file=tables_file,
+        )
+
+        # Save combined report
+        os.makedirs("results", exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = os.path.join("results", f"{base}_dbstats_{ts}.html")
+        report.save(output_path)
+
+    elif mode == "rowcount":
+        if has_dual:
             get_table_stats(
                 source_config_path=args.source_config,
                 target_config_path=args.target_config,
             )
-        elif args.config:
+        else:
             get_table_stats(config_path=args.config)
-        else:
-            parser.error(
-                "Either --config or both --source-config and --target-config required"
-            )
 
-    if mode in ("colcompare", "both"):
+    elif mode == "colcompare":
         type_mappings = load_type_mappings(args.type_config)
-        excluded_cols = load_excluded_cols(args.type_config)
-        if args.source_config and args.target_config:
-            colcompare_from_db(
-                args.source_config, args.target_config, type_mappings, excluded_cols
-            )
-        elif args.config:
-            colcompare_from_db(args.config, args.config, type_mappings, excluded_cols)
-        else:
-            parser.error(
-                "Either --config or both --source-config and --target-config required"
-            )
+        src_cfg_path = args.source_config or args.config
+        tgt_cfg_path = args.target_config or args.config
+        excluded_cols = collect_excluded_cols(
+            args.type_config,
+            load_config(src_cfg_path),
+            load_config(tgt_cfg_path),
+        )
+        colcompare_from_db(src_cfg_path, tgt_cfg_path, type_mappings, excluded_cols)
 
 
 if __name__ == "__main__":

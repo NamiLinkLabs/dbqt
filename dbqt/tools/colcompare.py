@@ -1,9 +1,8 @@
 """Column comparison tool — compare schemas between files or databases."""
 
 import argparse
-import re
-import os
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -11,14 +10,12 @@ import polars as pl
 import pyarrow
 import pyarrow.parquet as pq
 import yaml
-from openpyxl import Workbook
-from openpyxl.styles import PatternFill, Font, Alignment
-from openpyxl.utils import get_column_letter
 
 from dbqt.tools.utils import (
     load_config,
     setup_logging,
     Timer,
+    HTMLReport,
     fetch_all_metadata_as_df,
     _read_table_lists,
 )
@@ -31,12 +28,14 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TYPE_MAPPINGS = {
     "INTEGER": ["INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "NUMBER"],
-    "VARCHAR": ["VARCHAR", "TEXT", "CHAR", "STRING", "NVARCHAR", "VARCHAR2"],
+    "VARCHAR": ["VARCHAR", "TEXT", "CHAR", "STRING", "NVARCHAR", "VARCHAR2", "ENUM"],
     "DECIMAL": ["DECIMAL", "NUMERIC", "NUMBER"],
     "FLOAT": ["FLOAT", "REAL", "DOUBLE", "DOUBLE PRECISION"],
-    "TIMESTAMP": ["TIMESTAMP", "DATETIME"],
-    "DATE": ["DATE", "TIMESTAMP"],
+    "TIMESTAMP": ["TIMESTAMP", "DATETIME", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ"],
+    "DATE": ["DATE", "TIMESTAMP", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ"],
+    "DATETIME": ["TIMESTAMP", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ"],
     "BOOLEAN": ["BOOLEAN", "BOOL", "BIT"],
+    "ENUM": ["TEXT"],
 }
 
 
@@ -69,6 +68,33 @@ def load_excluded_cols(config_path=None):
     return set()
 
 
+def collect_excluded_cols(type_config=None, *configs):
+    """Merge ``excluded_cols`` from a type-mappings config and any number of
+    connection YAML configs (source / target).
+
+    Each config can be a file path (``str``) or an already-loaded ``dict``.
+    Returns a unified ``set`` of upper-cased column names.
+    """
+    merged: set[str] = set()
+
+    # Type-mappings config (the dedicated colcompare config file)
+    merged |= load_excluded_cols(type_config)
+
+    # Connection configs (source / target YAML dicts or paths)
+    for cfg in configs:
+        if cfg is None:
+            continue
+        if isinstance(cfg, str):
+            cfg = load_config(cfg)
+        raw = cfg.get("excluded_cols", [])
+        if raw:
+            merged |= {c.upper() for c in raw}
+
+    if merged:
+        logger.info(f"Total excluded columns (merged): {merged}")
+    return merged
+
+
 def generate_config_file(output_path="colcompare_config.yaml"):
     """Generate a default configuration file with type mappings."""
     config = {"type_mappings": DEFAULT_TYPE_MAPPINGS}
@@ -93,6 +119,11 @@ def generate_config_file(output_path="colcompare_config.yaml"):
             "excluded_cols:\n"
             "  # - CREATED_AT\n"
             "  # - UPDATED_AT\n"
+            "\n# Table name patterns to exclude (SQL-like % wildcards, case-insensitive)\n"
+            "# These are applied in the connection YAML, not here. Example:\n"
+            "# excluded_tables:\n"
+            "#   - %_FINAL\n"
+            "#   - TMP_%\n"
         )
 
     logger.info(f"Generated default config file at {output_path}")
@@ -311,52 +342,40 @@ def compare_columns(
 
 
 # ---------------------------------------------------------------------------
-# Excel report
+# HTML report helpers
 # ---------------------------------------------------------------------------
 
 
-def _format_worksheet(ws):
-    """Apply formatting to worksheet."""
-    header_fill = PatternFill(
-        start_color="366092", end_color="366092", fill_type="solid"
-    )
-    header_font = Font(color="FFFFFF", bold=True)
-    for cell in ws[1]:
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = Alignment(horizontal="center")
-    for column in ws.columns:
-        column = list(column)
-        max_len = max((len(str(c.value or "")) for c in column), default=0)
-        ws.column_dimensions[get_column_letter(column[0].column)].width = min(
-            max_len + 2, 21.6
-        )
-
-
-def create_excel_report(
+def build_colcompare_tabs(
     comparison_results,
     source_df,
     target_df,
-    file_name,
     type_mappings=None,
     excluded_cols=None,
 ):
-    """Create formatted Excel report."""
-    wb = Workbook()
+    """Return a list of (tab_name, columns, data) tuples for the comparison.
+
+    This is decoupled from file I/O so that dbstats can merge tabs into a
+    single report when running in *both* mode.
+    """
+    tabs = []
 
     # --- Table Comparison ---
-    ws = wb.active
-    ws.title = "Table Comparison"
-    ws.append(["Category", "Table Name"])
+    table_rows = []
     for cat in ("common", "source_only", "target_only"):
         label = cat.replace("_", " ").title()
         for t in comparison_results["tables"][cat]:
-            ws.append([label, t])
-    _format_worksheet(ws)
+            table_rows.append({"Category": label, "Table Name": t})
+    tabs.append(
+        (
+            "Table Comparison",
+            HTMLReport.columns_from_names(["Category", "Table Name"]),
+            table_rows,
+        )
+    )
 
     # --- Column Comparison ---
-    ws2 = wb.create_sheet("Column Comparison")
-    ws2.append(["Table Name", "Column Name", "Status", "Source Type", "Target Type"])
+    col_rows = []
     for tbl in comparison_results["columns"]:
         tn = tbl["table_name"]
         src = dict(
@@ -383,23 +402,71 @@ def create_excel_report(
                 status = "Matching"
             else:
                 status = "Different Types"
-            ws2.append([tn, col, status, st, tt])
-    _format_worksheet(ws2)
+            col_rows.append(
+                {
+                    "Table Name": tn,
+                    "Column Name": col,
+                    "Status": status,
+                    "Source Type": st,
+                    "Target Type": tt,
+                }
+            )
+    tabs.append(
+        (
+            "Column Comparison",
+            HTMLReport.columns_from_names(
+                ["Table Name", "Column Name", "Status", "Source Type", "Target Type"]
+            ),
+            col_rows,
+        )
+    )
 
     # --- Datatype Mismatches ---
-    ws3 = wb.create_sheet("Datatype Mismatches")
-    ws3.append(["Table Name", "Column Name", "Source Type", "Target Type"])
+    mismatch_rows = []
     for tbl in comparison_results["columns"]:
         for m in tbl["datatype_mismatches"]:
-            ws3.append(
-                [tbl["table_name"], m["column"], m["source_type"], m["target_type"]]
+            mismatch_rows.append(
+                {
+                    "Table Name": tbl["table_name"],
+                    "Column Name": m["column"],
+                    "Source Type": m["source_type"],
+                    "Target Type": m["target_type"],
+                }
             )
-    _format_worksheet(ws3)
+    tabs.append(
+        (
+            "Datatype Mismatches",
+            HTMLReport.columns_from_names(
+                ["Table Name", "Column Name", "Source Type", "Target Type"]
+            ),
+            mismatch_rows,
+        )
+    )
 
-    os.makedirs("results", exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return tabs
+
+
+def create_html_report(
+    comparison_results,
+    source_df,
+    target_df,
+    file_name,
+    type_mappings=None,
+    excluded_cols=None,
+):
+    """Create an interactive HTML report with Tabulator tables."""
+    tabs = build_colcompare_tabs(
+        comparison_results, source_df, target_df, type_mappings, excluded_cols
+    )
+
     safe_name = file_name.split("/")[-1] if "/" in file_name else file_name
-    wb.save(f"results/{safe_name}_{ts}.xlsx")
+    report = HTMLReport(f"Column Comparison — {safe_name}")
+    for tab_name, columns, data in tabs:
+        report.add_tab(tab_name, columns=columns, data=data)
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = f"results/{safe_name}_{ts}.html"
+    return report.save(output_path)
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +477,7 @@ def create_excel_report(
 def _run_comparison(
     source_df, target_df, report_name, type_mappings=None, excluded_cols=None
 ):
-    """Run table/column comparison and generate Excel report."""
+    """Run table/column comparison and generate HTML report."""
     table_comparison = compare_tables(source_df, target_df)
     column_comparisons = []
     for tbl in table_comparison["common"]:
@@ -418,35 +485,94 @@ def _run_comparison(
         column_comparisons.append({"table_name": tbl, **cc})
 
     results = {"tables": table_comparison, "columns": column_comparisons}
-    create_excel_report(
+    output_path = create_html_report(
         results, source_df, target_df, report_name, type_mappings, excluded_cols
     )
+    results["output_path"] = output_path
     return results
 
 
 def colcompare_from_db(
-    source_config_path, target_config_path, type_mappings=None, excluded_cols=None
+    source_config_path=None,
+    target_config_path=None,
+    type_mappings=None,
+    excluded_cols=None,
+    *,
+    report=None,
+    source_config=None,
+    target_config=None,
+    source_tables=None,
+    target_tables=None,
+    tables_file=None,
+    source_connector=None,
+    target_connector=None,
 ):
-    """Compare column schemas by fetching metadata directly from databases."""
-    with Timer("Database column comparison"):
-        source_config = load_config(source_config_path)
-        target_config = load_config(target_config_path)
+    """Compare column schemas by fetching metadata directly from databases.
 
-        tables_file = source_config.get("tables_file") or target_config.get(
-            "tables_file"
-        )
-        max_workers = source_config.get("max_workers", 4)
-        df, source_tables, target_tables = _read_table_lists(
-            tables_file, source_config, target_config
-        )
+    Parameters
+    ----------
+    source_config_path / target_config_path : str | None
+        Paths to YAML config files.  Ignored when *source_config* /
+        *target_config* are supplied directly.
+    report : HTMLReport | None
+        If provided, colcompare tabs are added to this existing report
+        instead of creating a standalone file.  Returns ``None`` in that
+        case (the caller is responsible for saving the report).
+    source_config / target_config : dict | None
+        Pre-loaded config dicts.  When provided the corresponding
+        ``*_config_path`` is not read, avoiding redundant I/O.
+    source_tables / target_tables : list[str] | None
+        Pre-discovered table lists.  When provided the table-discovery
+        step is skipped entirely, avoiding redundant database connections.
+    tables_file : str | None
+        Override for the tables CSV path.  Only used when table lists are
+        not supplied directly.
+    source_connector / target_connector : DBConnector | None
+        Already-connected database connectors.  When provided the
+        metadata fetch reuses these connections instead of opening new
+        ones.  The caller owns the connection lifecycle.
+    """
+    with Timer("Database column comparison"):
+        if source_config is None:
+            source_config = load_config(source_config_path)
+        if target_config is None:
+            target_config = load_config(target_config_path)
+
+        # Merge excluded_cols from source/target connection configs
+        # so users don't need a separate type-config file just for this.
+        cfg_excluded = collect_excluded_cols(None, source_config, target_config)
+        if cfg_excluded:
+            if excluded_cols is None:
+                excluded_cols = cfg_excluded
+            else:
+                excluded_cols = excluded_cols | cfg_excluded
+
+        # Discover tables only when the caller hasn't provided them
+        if source_tables is None:
+            if tables_file is None:
+                tables_file = source_config.get("tables_file") or target_config.get(
+                    "tables_file"
+                )
+            _df, source_tables, target_tables = _read_table_lists(
+                tables_file, source_config, target_config
+            )
+        else:
+            if tables_file is None:
+                tables_file = source_config.get("tables_file") or target_config.get(
+                    "tables_file"
+                )
 
         if target_tables is None:
             target_tables = source_tables
 
         # Fetch all column metadata per schema in a single query each,
         # then filter to only the tables we care about.
-        source_df = fetch_all_metadata_as_df(source_config, source_tables)
-        target_df = fetch_all_metadata_as_df(target_config, target_tables)
+        source_df = fetch_all_metadata_as_df(
+            source_config, source_tables, connector=source_connector
+        )
+        target_df = fetch_all_metadata_as_df(
+            target_config, target_tables, connector=target_connector
+        )
 
         if tables_file:
             report_name = Path(tables_file).stem
@@ -455,8 +581,41 @@ def colcompare_from_db(
 
             schema_label = get_schema_label(target_config)
             report_name = f"{schema_label}_colcompare_report"
-        _run_comparison(source_df, target_df, report_name, type_mappings, excluded_cols)
+
+        # Build comparison results
+        table_comparison = compare_tables(source_df, target_df)
+        column_comparisons = []
+        for tbl in table_comparison["common"]:
+            cc = compare_columns(
+                source_df, target_df, tbl, type_mappings, excluded_cols
+            )
+            column_comparisons.append({"table_name": tbl, **cc})
+        comp_results = {"tables": table_comparison, "columns": column_comparisons}
+
+        # If an external report was provided, append tabs to it
+        # Skip "Table Comparison" tab — the row-counts tab already covers that.
+        if report is not None:
+            tabs = build_colcompare_tabs(
+                comp_results, source_df, target_df, type_mappings, excluded_cols
+            )
+            for tab_name, columns, data in tabs:
+                if tab_name == "Table Comparison":
+                    continue
+                report.add_tab(tab_name, columns=columns, data=data)
+            logger.info("Database column comparison complete (tabs added to report)")
+            return None
+
+        # Standalone mode — write our own HTML file
+        output_path = create_html_report(
+            comp_results,
+            source_df,
+            target_df,
+            report_name,
+            type_mappings,
+            excluded_cols,
+        )
         logger.info("Database column comparison complete")
+        return output_path
 
 
 def colcompare(args=None):
@@ -516,7 +675,7 @@ To generate a default configuration file:
             generate_config_file(args.output)
             return
 
-        # Build excluded_cols set: CLI flag takes priority, then config file
+        # Build excluded_cols set: CLI flag merges with config file
         config_path = getattr(args, "config", None)
         if args.excluded_cols is not None:
             excluded_cols = {c.upper() for c in args.excluded_cols}
@@ -525,6 +684,11 @@ To generate a default configuration file:
 
         if args.source_config and args.target_config:
             tm = load_type_mappings(config_path)
+            excluded_cols = collect_excluded_cols(
+                config_path,
+                load_config(args.source_config),
+                load_config(args.target_config),
+            )
             colcompare_from_db(
                 args.source_config, args.target_config, tm, excluded_cols
             )
@@ -537,11 +701,10 @@ To generate a default configuration file:
 
     config_path = getattr(args, "config", None)
     type_mappings = load_type_mappings(config_path)
-    if not hasattr(args, "_excluded_cols_resolved"):
-        if getattr(args, "excluded_cols", None) is not None:
-            excluded_cols = {c.upper() for c in args.excluded_cols}
-        else:
-            excluded_cols = load_excluded_cols(config_path)
+    if getattr(args, "excluded_cols", None) is not None:
+        excluded_cols = {c.upper() for c in args.excluded_cols}
+    else:
+        excluded_cols = load_excluded_cols(config_path)
 
     with Timer("Column comparison"):
         source_df, target_df = read_files(args.source, args.target)
