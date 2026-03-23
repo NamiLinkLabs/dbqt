@@ -94,6 +94,10 @@ The tool uses intelligent type compatibility checking (e.g., `INT` and `BIGINT` 
    dbqt compare source.csv target.csv --config colcompare_config.yaml
    ```
 
+**Note:** `excluded_cols` can also be placed directly in your connection YAML configs
+(source and/or target). When running database-backed comparisons, exclusions from all
+configs are merged automatically.
+
 To generate CSV schema files from your database, run this query:
 ```sql
 SELECT
@@ -145,6 +149,9 @@ dbqt dbstats colcompare --source-config source_config.yaml --target-config targe
 
 # Both row counts and column comparison in one run
 dbqt dbstats both --source-config source_config.yaml --target-config target_config.yaml
+
+# Both mode with custom type mappings
+dbqt dbstats both --source-config source_config.yaml --target-config target_config.yaml --type-config colcompare_config.yaml
 
 # Generate a default column type mappings configuration file
 dbqt dbstats --generate-col-mappings
