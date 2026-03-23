@@ -15,11 +15,12 @@ Compare schemas between databases or files:
 - Supports `table`, `schema.table`, and `db.schema.table` patterns in CSV files
 - Intelligent data type compatibility checking
 - **Customizable type mappings via YAML configuration**
-- Generates detailed Excel report with:
+- Generates interactive HTML report (powered by [Tabulator](https://tabulator.info/)) with:
   - Table differences
   - Column differences
   - Data type mismatches
-  - Formatted worksheets for easy analysis
+  - Sortable, filterable, searchable tables
+  - Built-in XLSX export button
 
 Usage:
 ```bash
@@ -93,6 +94,10 @@ The tool uses intelligent type compatibility checking (e.g., `INT` and `BIGINT` 
    dbqt compare source.csv target.csv --config colcompare_config.yaml
    ```
 
+**Note:** `excluded_cols` can also be placed directly in your connection YAML configs
+(source and/or target). When running database-backed comparisons, exclusions from all
+configs are merged automatically.
+
 To generate CSV schema files from your database, run this query:
 ```sql
 SELECT
@@ -127,7 +132,8 @@ Collect and analyze database statistics with multiple modes:
 - Supports separate source and target database configurations for cross-database comparisons
 - Supports `table`, `schema.table`, and `db.schema.table` patterns in CSV files
 - Automatically calculates differences and percentage changes for comparisons
-- Updates statistics in a CSV file with comprehensive error reporting
+- Generates interactive HTML reports with sortable, filterable tables
+- Built-in XLSX export from the browser
 - Configurable through YAML
 
 Usage:
@@ -143,6 +149,9 @@ dbqt dbstats colcompare --source-config source_config.yaml --target-config targe
 
 # Both row counts and column comparison in one run
 dbqt dbstats both --source-config source_config.yaml --target-config target_config.yaml
+
+# Both mode with custom type mappings
+dbqt dbstats both --source-config source_config.yaml --target-config target_config.yaml --type-config colcompare_config.yaml
 
 # Generate a default column type mappings configuration file
 dbqt dbstats --generate-col-mappings
@@ -182,6 +191,13 @@ tables_file: tables.csv
 
 # Optional: number of parallel workers (default: 4)
 max_workers: 10
+
+# Optional: exclude tables matching SQL-like patterns (case-insensitive)
+# % matches any sequence of characters
+excluded_tables:
+  - "%_FINAL"
+  - "TMP_%"
+  - "%_BAK_%"
 ```
 
 Example dual database configuration (for cross-database comparisons):
@@ -222,6 +238,16 @@ use those for row counts and/or column comparisons. In dual-database mode, only
 tables present in **both** databases will have row counts collected — tables that
 exist in only one side are reported with a note like *"Only in source, row count
 skipped"* since comparing a missing table is not meaningful.
+
+**Excluding tables:** Add `excluded_tables` to your YAML config to filter out
+tables by pattern. Patterns use SQL-like `%` wildcards and are case-insensitive:
+```yaml
+excluded_tables:
+  - "%_FINAL"    # any table ending in _FINAL
+  - "TMP_%"      # any table starting with TMP_
+  - "%_BAK_%"    # any table containing _BAK_
+```
+This works with both CSV-provided table lists and auto-discovered tables.
 
 Table names in the CSV support flexible path formats:
 - `my_table` — uses database/schema from YAML config

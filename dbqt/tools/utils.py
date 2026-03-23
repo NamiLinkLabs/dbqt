@@ -1,6 +1,7 @@
 """Shared utilities for dbqt tools."""
 
 import csv
+import json
 import yaml
 import logging
 import threading
@@ -182,6 +183,33 @@ def get_schema_label(config):
     return "default"
 
 
+def filter_excluded_tables(tables, excluded_patterns):
+    """Filter out tables matching any of the exclusion patterns.
+
+    Patterns use SQL-like wildcards: ``%`` matches any sequence of
+    characters.  Matching is case-insensitive.
+
+    Example patterns: ``%_FINAL``, ``TMP_%``, ``%_BAK_%``
+    """
+    if not excluded_patterns:
+        return tables
+
+    import re as _re
+
+    compiled = []
+    for pat in excluded_patterns:
+        regex = _re.escape(pat.upper()).replace(r"\%", ".*")
+        compiled.append(_re.compile(f"^{regex}$", _re.IGNORECASE))
+
+    filtered = [t for t in tables if not any(r.match(t) for r in compiled)]
+    removed = len(tables) - len(filtered)
+    if removed:
+        logger.info(
+            f"Excluded {removed} table(s) matching patterns: {excluded_patterns}"
+        )
+    return filtered
+
+
 def discover_tables_from_db(config):
     """Connect to a database and list all tables in the configured schema.
 
@@ -202,16 +230,32 @@ def _read_table_lists(tables_file, source_config=None, target_config=None):
     If *tables_file* is ``None``, tables are auto-discovered from the database
     schema defined in the YAML config(s).
 
+    Tables matching ``excluded_tables`` patterns in the YAML config(s) are
+    removed automatically.
+
     Returns target_tables=None when operating in single-config mode.
     """
     import polars as pl
 
+    # Collect exclusion patterns from config(s)
+    _exc_patterns = set()
+    for cfg in (source_config, target_config):
+        if cfg:
+            for pat in cfg.get("excluded_tables", []):
+                _exc_patterns.add(pat)
+    exc_patterns = sorted(_exc_patterns) if _exc_patterns else []
+
     if tables_file is not None:
         df = pl.read_csv(tables_file)
         if "source_table" in df.columns and "target_table" in df.columns:
-            return df, df["source_table"].to_list(), df["target_table"].to_list()
+            src = filter_excluded_tables(df["source_table"].to_list(), exc_patterns)
+            tgt = filter_excluded_tables(df["target_table"].to_list(), exc_patterns)
+            df = df.filter(pl.col("source_table").is_in(src))
+            return df, src, tgt
         elif "table_name" in df.columns:
-            return df, df["table_name"].to_list(), None
+            tables = filter_excluded_tables(df["table_name"].to_list(), exc_patterns)
+            df = df.filter(pl.col("table_name").is_in(tables))
+            return df, tables, None
         else:
             raise ValueError(
                 "CSV must contain 'table_name' or 'source_table'/'target_table' columns."
@@ -221,30 +265,46 @@ def _read_table_lists(tables_file, source_config=None, target_config=None):
     logger.info("No tables_file provided — discovering tables from database schema")
 
     if source_config and target_config and source_config is not target_config:
-        source_tables_set = set(discover_tables_from_db(source_config))
-        target_tables_set = set(discover_tables_from_db(target_config))
-        common = sorted(source_tables_set & target_tables_set)
-        source_only = sorted(source_tables_set - target_tables_set)
-        target_only = sorted(target_tables_set - source_tables_set)
+        source_tables_raw = filter_excluded_tables(
+            discover_tables_from_db(source_config), exc_patterns
+        )
+        target_tables_raw = filter_excluded_tables(
+            discover_tables_from_db(target_config), exc_patterns
+        )
+
+        # Build case-insensitive lookup maps: upper -> original
+        source_map = {t.upper(): t for t in source_tables_raw}
+        target_map = {t.upper(): t for t in target_tables_raw}
+
+        source_upper = set(source_map.keys())
+        target_upper = set(target_map.keys())
+
+        common_upper = sorted(source_upper & target_upper)
+        source_only_upper = sorted(source_upper - target_upper)
+        target_only_upper = sorted(target_upper - source_upper)
 
         rows = []
-        for t in common:
-            rows.append(
-                {"source_table": t, "target_table": t, "_discovery_status": "common"}
-            )
-        for t in source_only:
+        for u in common_upper:
             rows.append(
                 {
-                    "source_table": t,
-                    "target_table": t,
+                    "source_table": source_map[u],
+                    "target_table": target_map[u],
+                    "_discovery_status": "common",
+                }
+            )
+        for u in source_only_upper:
+            rows.append(
+                {
+                    "source_table": source_map[u],
+                    "target_table": source_map[u],
                     "_discovery_status": "source_only",
                 }
             )
-        for t in target_only:
+        for u in target_only_upper:
             rows.append(
                 {
-                    "source_table": t,
-                    "target_table": t,
+                    "source_table": target_map[u],
+                    "target_table": target_map[u],
                     "_discovery_status": "target_only",
                 }
             )
@@ -256,7 +316,9 @@ def _read_table_lists(tables_file, source_config=None, target_config=None):
             df["target_table"].to_list(),
         )
     elif source_config:
-        tables = discover_tables_from_db(source_config)
+        tables = filter_excluded_tables(
+            discover_tables_from_db(source_config), exc_patterns
+        )
         df = pl.DataFrame({"table_name": tables})
         return df, tables, None
     else:
@@ -326,22 +388,32 @@ def metadata_to_df(results, table_names):
     return pl.DataFrame(rows)
 
 
-def fetch_all_metadata_as_df(config, table_names=None):
+def fetch_all_metadata_as_df(config, table_names=None, connector=None):
     """Fetch column metadata for an entire schema in ONE query, return a Polars DataFrame.
 
     If *table_names* is provided the result is filtered to only those tables.
     This is much faster than ``fetch_metadata_parallel`` when many tables are
     involved because it issues a single ``SELECT … FROM information_schema.columns``
     (or equivalent) instead of one query per table.
+
+    Parameters
+    ----------
+    connector : DBConnector | None
+        An already-connected database connector.  When provided the caller
+        owns the connection lifecycle — this function will neither connect
+        nor disconnect it.
     """
     import polars as pl
 
-    connector = create_connector(config["connection"])
-    connector.connect()
+    owns_connection = connector is None
+    if owns_connection:
+        connector = create_connector(config["connection"])
+        connector.connect()
     try:
         raw = connector.fetch_schema_metadata()
     finally:
-        connector.disconnect()
+        if owns_connection:
+            connector.disconnect()
 
     # raw rows: (table_name, column_name, data_type, dt_prec, num_prec, num_scale)
     if not raw:
@@ -374,6 +446,217 @@ def fetch_all_metadata_as_df(config, table_names=None):
         df = df.filter(pl.col("SCH_TABLE").is_in(upper_names))
 
     return df
+
+
+# ---------------------------------------------------------------------------
+# HTML report builder (Tabulator-based)
+# ---------------------------------------------------------------------------
+
+_TABULATOR_CSS = (
+    "https://unpkg.com/tabulator-tables@6.3.1/dist/css/tabulator_midnight.min.css"
+)
+_TABULATOR_JS = "https://unpkg.com/tabulator-tables@6.3.1/dist/js/tabulator.min.js"
+_XLSX_JS = "https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"
+
+
+class HTMLReport:
+    """Build a self-contained HTML file with tabbed Tabulator tables.
+
+    Usage::
+
+        report = HTMLReport("My Report")
+        report.add_tab("Row Counts", columns=[...], data=[...])
+        report.add_tab("Columns", columns=[...], data=[...])
+        report.save("results/report.html")
+    """
+
+    def __init__(self, title: str = "Report"):
+        self.title = title
+        self.tabs: list[dict] = []
+
+    # -- helpers to build Tabulator column definitions ----------------------
+
+    @staticmethod
+    def columns_from_names(names: list[str]) -> list[dict]:
+        """Create simple Tabulator column definitions from a list of names."""
+        return [
+            {"title": n, "field": n, "headerFilter": "input", "sorter": "string"}
+            for n in names
+        ]
+
+    @staticmethod
+    def columns_from_polars(df) -> list[dict]:
+        """Infer Tabulator column definitions from a Polars DataFrame."""
+        import polars as pl
+
+        cols = []
+        for name in df.columns:
+            dtype = df[name].dtype
+            if dtype in (
+                pl.Int8,
+                pl.Int16,
+                pl.Int32,
+                pl.Int64,
+                pl.UInt8,
+                pl.UInt16,
+                pl.UInt32,
+                pl.UInt64,
+                pl.Float32,
+                pl.Float64,
+            ):
+                sorter = "number"
+                hf = "number"
+                formatter = "plaintext"
+            else:
+                sorter = "string"
+                hf = "input"
+                formatter = "plaintext"
+            cols.append(
+                {
+                    "title": name,
+                    "field": name,
+                    "headerFilter": hf,
+                    "sorter": sorter,
+                    "formatter": formatter,
+                }
+            )
+        return cols
+
+    # -- adding tabs --------------------------------------------------------
+
+    def add_tab(self, name: str, *, columns: list[dict], data: list[dict]):
+        """Append a tab to the report.
+
+        *columns* – list of Tabulator column definition dicts.
+        *data*    – list of row dicts (JSON-serialisable).
+        """
+        self.tabs.append({"name": name, "columns": columns, "data": data})
+
+    def add_polars_tab(self, name: str, df):
+        """Convenience: add a tab directly from a Polars DataFrame."""
+        columns = self.columns_from_polars(df)
+        data = df.to_dicts()
+        # Ensure all values are JSON-serialisable (None is fine, but NaN is not)
+        for row in data:
+            for k, v in row.items():
+                if isinstance(v, float) and (v != v):  # NaN check
+                    row[k] = None
+        self.add_tab(name, columns=columns, data=data)
+
+    # -- rendering ----------------------------------------------------------
+
+    def _render(self) -> str:
+        tab_buttons = []
+        tab_divs = []
+        tab_scripts = []
+
+        for i, tab in enumerate(self.tabs):
+            tab_id = f"tab_{i}"
+            active = "active" if i == 0 else ""
+            display = "block" if i == 0 else "none"
+
+            tab_buttons.append(
+                f'<button class="tab-btn {active}" onclick="switchTab(event, \'{tab_id}\')">'
+                f'{tab["name"]}</button>'
+            )
+            tab_divs.append(
+                f'<div id="{tab_id}" class="tab-content" style="display:{display}">'
+                f'  <div id="{tab_id}_table"></div>'
+                f"</div>"
+            )
+            tab_scripts.append(
+                f'new Tabulator("#{tab_id}_table", {{\n'
+                f'  data: {json.dumps(tab["data"])},\n'
+                f'  columns: {json.dumps(tab["columns"])},\n'
+                f'  layout: "fitDataTable",\n'
+                f'  height: "calc(100vh - 120px)",\n'
+                f"  pagination: false,\n"
+                f"  movableColumns: true,\n"
+                f"  clipboard: true,\n"
+                f"  downloadConfig: {{ columnHeaders: true }},\n"
+                f"}});"
+            )
+
+        buttons_html = "\n".join(tab_buttons)
+        divs_html = "\n".join(tab_divs)
+        scripts_js = "\n".join(tab_scripts)
+
+        return f"""\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{self.title}</title>
+<link rel="stylesheet" href="{_TABULATOR_CSS}">
+<script src="{_TABULATOR_JS}"></script>
+<script src="{_XLSX_JS}"></script>
+<style>
+  body {{ font-family: Arial, sans-serif; margin: 0; padding: 10px; background: #1a1a2e; color: #eee; }}
+  h1 {{ margin: 0 0 10px 0; font-size: 1.3em; }}
+  .tab-bar {{ display: flex; gap: 4px; margin-bottom: 8px; flex-wrap: wrap; align-items: center; }}
+  .tab-btn {{
+    padding: 6px 16px; border: none; cursor: pointer; border-radius: 4px 4px 0 0;
+    background: #16213e; color: #aaa; font-size: 0.9em;
+  }}
+  .tab-btn.active {{ background: #0f3460; color: #fff; }}
+  .tab-btn:hover {{ background: #0f3460; color: #fff; }}
+  .export-btn {{
+    margin-left: auto; padding: 6px 14px; border: 1px solid #555; border-radius: 4px;
+    background: #16213e; color: #ccc; cursor: pointer; font-size: 0.85em;
+  }}
+  .export-btn:hover {{ background: #0f3460; color: #fff; }}
+  .tab-content {{ display: none; }}
+</style>
+</head>
+<body>
+<h1>{self.title}</h1>
+<div class="tab-bar">
+  {buttons_html}
+  <button class="export-btn" onclick="exportXLSX()">⬇ Export XLSX</button>
+</div>
+{divs_html}
+<script>
+var tabulators = {{}};
+function switchTab(evt, tabId) {{
+  document.querySelectorAll('.tab-content').forEach(d => d.style.display = 'none');
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById(tabId).style.display = 'block';
+  evt.currentTarget.classList.add('active');
+}}
+function exportXLSX() {{
+  /* Build a multi-sheet XLSX using SheetJS from all Tabulator instances */
+  var wb = XLSX.utils.book_new();
+  var tabs = {json.dumps([t["name"] for t in self.tabs])};
+  for (var i = 0; i < tabs.length; i++) {{
+    var tableId = "tab_" + i + "_table";
+    var el = document.getElementById(tableId);
+    if (!el) continue;
+    var table = el.querySelector('.tabulator-table');
+    if (!table) continue;
+    var ws = XLSX.utils.table_to_sheet(el.querySelector('.tabulator-tableholder'));
+    /* Fallback: use JSON data */
+    if (!ws || !ws['!ref']) {{
+      var data = tabulators["tab_" + i] ? tabulators["tab_" + i].getData() : [];
+      ws = XLSX.utils.json_to_sheet(data);
+    }}
+    XLSX.utils.book_append_sheet(wb, ws, tabs[i].substring(0, 31));
+  }}
+  XLSX.writeFile(wb, "{self.title}.xlsx");
+}}
+{scripts_js}
+</script>
+</body>
+</html>"""
+
+    def save(self, path: str) -> str:
+        """Write the HTML report to *path* and return the path."""
+        import os
+
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(self._render())
+        logger.info(f"Report saved to {path}")
+        return path
 
 
 class Timer:
