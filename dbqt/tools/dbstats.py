@@ -103,9 +103,29 @@ def get_table_stats(
         if table_lists is not None:
             df, source_tables, target_tables = table_lists
         else:
-            df, source_tables, target_tables = _read_table_lists(
-                tables_file, source_config, target_config
-            )
+            # Open a minimal pool (1 connection per side) to reuse for table
+            # discovery, avoiding a second SSO browser prompt on Snowflake.
+            actual_workers = min(max_workers, 1)
+            with ConnectionPool(source_config, actual_workers) as src_pool:
+                src_conn = src_pool.connectors[0]
+                if target_config is not source_config:
+                    with ConnectionPool(target_config, actual_workers) as tgt_pool:
+                        tgt_conn = tgt_pool.connectors[0]
+                        df, source_tables, target_tables = _read_table_lists(
+                            tables_file,
+                            source_config,
+                            target_config,
+                            source_connector=src_conn,
+                            target_connector=tgt_conn,
+                        )
+                else:
+                    df, source_tables, target_tables = _read_table_lists(
+                        tables_file,
+                        source_config,
+                        target_config,
+                        source_connector=src_conn,
+                        target_connector=src_conn,
+                    )
 
         if target_tables is not None:
             # source/target mode

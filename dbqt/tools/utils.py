@@ -210,25 +210,41 @@ def filter_excluded_tables(tables, excluded_patterns):
     return filtered
 
 
-def discover_tables_from_db(config):
+def discover_tables_from_db(config, connector=None):
     """Connect to a database and list all tables in the configured schema.
+
+    If *connector* is provided (already connected), it will be reused and
+    the caller owns the connection lifecycle.  Otherwise a temporary
+    connection is created and torn down automatically.
 
     Returns a list of table name strings.
     """
-    connector = create_connector(config["connection"])
-    connector.connect()
+    owns_connection = connector is None
+    if owns_connection:
+        connector = create_connector(config["connection"])
+        connector.connect()
     try:
         tables = connector.list_tables()
     finally:
-        connector.disconnect()
+        if owns_connection:
+            connector.disconnect()
     return tables
 
 
-def _read_table_lists(tables_file, source_config=None, target_config=None):
+def _read_table_lists(
+    tables_file,
+    source_config=None,
+    target_config=None,
+    source_connector=None,
+    target_connector=None,
+):
     """Read the tables CSV and return (df, source_tables, target_tables).
 
     If *tables_file* is ``None``, tables are auto-discovered from the database
     schema defined in the YAML config(s).
+
+    *source_connector* / *target_connector* — optional already-connected
+    connectors to reuse for table discovery, avoiding extra SSO prompts.
 
     Tables matching ``excluded_tables`` patterns in the YAML config(s) are
     removed automatically.
@@ -266,10 +282,12 @@ def _read_table_lists(tables_file, source_config=None, target_config=None):
 
     if source_config and target_config and source_config is not target_config:
         source_tables_raw = filter_excluded_tables(
-            discover_tables_from_db(source_config), exc_patterns
+            discover_tables_from_db(source_config, connector=source_connector),
+            exc_patterns,
         )
         target_tables_raw = filter_excluded_tables(
-            discover_tables_from_db(target_config), exc_patterns
+            discover_tables_from_db(target_config, connector=target_connector),
+            exc_patterns,
         )
 
         # Build case-insensitive lookup maps: upper -> original
@@ -317,7 +335,8 @@ def _read_table_lists(tables_file, source_config=None, target_config=None):
         )
     elif source_config:
         tables = filter_excluded_tables(
-            discover_tables_from_db(source_config), exc_patterns
+            discover_tables_from_db(source_config, connector=source_connector),
+            exc_patterns,
         )
         df = pl.DataFrame({"table_name": tables})
         return df, tables, None
@@ -565,7 +584,7 @@ class HTMLReport:
                 f"</div>"
             )
             tab_scripts.append(
-                f'new Tabulator("#{tab_id}_table", {{\n'
+                f'tabulators["{tab_id}"] = new Tabulator("#{tab_id}_table", {{\n'
                 f'  data: {json.dumps(tab["data"])},\n'
                 f'  columns: {json.dumps(tab["columns"])},\n'
                 f'  layout: "fitDataTable",\n'
@@ -628,17 +647,10 @@ function exportXLSX() {{
   var wb = XLSX.utils.book_new();
   var tabs = {json.dumps([t["name"] for t in self.tabs])};
   for (var i = 0; i < tabs.length; i++) {{
-    var tableId = "tab_" + i + "_table";
-    var el = document.getElementById(tableId);
-    if (!el) continue;
-    var table = el.querySelector('.tabulator-table');
-    if (!table) continue;
-    var ws = XLSX.utils.table_to_sheet(el.querySelector('.tabulator-tableholder'));
-    /* Fallback: use JSON data */
-    if (!ws || !ws['!ref']) {{
-      var data = tabulators["tab_" + i] ? tabulators["tab_" + i].getData() : [];
-      ws = XLSX.utils.json_to_sheet(data);
-    }}
+    var tabId = "tab_" + i;
+    var instance = tabulators[tabId];
+    var data = instance ? instance.getData() : [];
+    var ws = XLSX.utils.json_to_sheet(data);
     XLSX.utils.book_append_sheet(wb, ws, tabs[i].substring(0, 31));
   }}
   XLSX.writeFile(wb, "{self.title}.xlsx");
