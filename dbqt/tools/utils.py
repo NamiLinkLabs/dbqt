@@ -1,5 +1,6 @@
 """Shared utilities for dbqt tools."""
 
+import re
 import csv
 import json
 import yaml
@@ -194,14 +195,18 @@ def filter_excluded_tables(tables, excluded_patterns):
     if not excluded_patterns:
         return tables
 
-    import re as _re
-
     compiled = []
     for pat in excluded_patterns:
-        regex = _re.escape(pat.upper()).replace(r"\%", ".*")
-        compiled.append(_re.compile(f"^{regex}$", _re.IGNORECASE))
+        # Escape regex metacharacters, then convert SQL LIKE wildcards
+        # % and _ are not regex special chars so re.escape leaves them alone
+        regex = re.escape(pat.upper()).replace("%", ".*").replace("_", ".")
+        compiled.append(re.compile(f"^{regex}$", re.IGNORECASE))
 
-    filtered = [t for t in tables if not any(r.match(t) for r in compiled)]
+    def _excluded(t):
+        leaf = t.rsplit(".", 1)[-1]
+        return any(r.match(t) or r.match(leaf) for r in compiled)
+
+    filtered = [t for t in tables if not _excluded(t)]
     removed = len(tables) - len(filtered)
     if removed:
         logger.info(
