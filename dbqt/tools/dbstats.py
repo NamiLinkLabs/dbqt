@@ -141,14 +141,16 @@ def get_table_stats(
             source_tables_to_count = [
                 t
                 for t in source_tables
-                if discovery_status.get(t, "common") in ("common", "source_only_count")
+                if t
+                and discovery_status.get(t, "common") in ("common", "source_only_count")
                 and discovery_status.get(t, "common") != "target_only"
                 and discovery_status.get(t, "common") != "source_only"
             ]
             target_tables_to_count = [
                 t
                 for t in target_tables
-                if discovery_status.get(t, "common") in ("common", "target_only_count")
+                if t
+                and discovery_status.get(t, "common") in ("common", "target_only_count")
                 and discovery_status.get(t, "common") != "source_only"
                 and discovery_status.get(t, "common") != "target_only"
             ]
@@ -174,6 +176,10 @@ def get_table_stats(
 
             src_counts, src_notes, tgt_counts, tgt_notes = [], [], [], []
             for t in source_tables:
+                if not t:
+                    src_counts.append(None)
+                    src_notes.append("No source table specified")
+                    continue
                 status = discovery_status.get(t, "common")
                 if status == "source_only":
                     src_counts.append(None)
@@ -181,11 +187,18 @@ def get_table_stats(
                 elif status == "target_only":
                     src_counts.append(None)
                     src_notes.append("Only in target, row count skipped")
-                else:
+                elif t in source_results:
                     c, e = source_results[t]
                     src_counts.append(c)
                     src_notes.append(e)
+                else:
+                    src_counts.append(None)
+                    src_notes.append("Row count skipped")
             for t in target_tables:
+                if not t:
+                    tgt_counts.append(None)
+                    tgt_notes.append("No target table specified")
+                    continue
                 status = discovery_status.get(t, "common")
                 if status == "target_only":
                     tgt_counts.append(None)
@@ -193,10 +206,13 @@ def get_table_stats(
                 elif status == "source_only":
                     tgt_counts.append(None)
                     tgt_notes.append("Only in source, row count skipped")
-                else:
+                elif t in target_results:
                     c, e = target_results[t]
                     tgt_counts.append(c)
                     tgt_notes.append(e)
+                else:
+                    tgt_counts.append(None)
+                    tgt_notes.append("Row count skipped")
 
             df = df.with_columns(
                 pl.Series("source_row_count", src_counts),

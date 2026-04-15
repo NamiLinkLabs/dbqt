@@ -203,7 +203,9 @@ def filter_excluded_tables(tables, excluded_patterns):
         compiled.append(re.compile(f"^{regex}$", re.IGNORECASE))
 
     def _excluded(t):
-        leaf = t.rsplit(".", 1)[-1]
+        if not t:
+            return None
+        leaf = t.split(".")[-1]
         return any(r.match(t) or r.match(leaf) for r in compiled)
 
     filtered = [t for t in tables if not _excluded(t)]
@@ -269,9 +271,19 @@ def _read_table_lists(
     if tables_file is not None:
         df = pl.read_csv(tables_file)
         if "source_table" in df.columns and "target_table" in df.columns:
-            src = filter_excluded_tables(df["source_table"].to_list(), exc_patterns)
-            tgt = filter_excluded_tables(df["target_table"].to_list(), exc_patterns)
-            df = df.filter(pl.col("source_table").is_in(src))
+            src_all = df["source_table"].to_list()
+            tgt_all = df["target_table"].to_list()
+            src_excluded = set(filter_excluded_tables(src_all, exc_patterns))
+            tgt_excluded = set(filter_excluded_tables(tgt_all, exc_patterns))
+            # Keep rows where BOTH source and target pass exclusion filters
+            # (treat empty/null values as passing — they are handled downstream)
+            mask = [
+                (not s or s in src_excluded) and (not t or t in tgt_excluded)
+                for s, t in zip(src_all, tgt_all)
+            ]
+            df = df.filter(pl.Series(mask))
+            src = df["source_table"].to_list()
+            tgt = df["target_table"].to_list()
             return df, src, tgt
         elif "table_name" in df.columns:
             tables = filter_excluded_tables(df["table_name"].to_list(), exc_patterns)
